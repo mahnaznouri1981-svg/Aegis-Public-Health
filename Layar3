@@ -1,0 +1,312 @@
+# -*- coding: utf-8 -*-
+"""
+LAYER 3 — STATISTICAL REASONING & DECISION ENGINE
+Author:Mahnaz Nouri
+"""
+
+# =========================================================
+# IMPORTS
+# =========================================================
+import json
+import numpy as np
+import pandas as pd
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+from scipy import stats
+
+from statsmodels.tsa.stattools import (
+    adfuller,
+    grangercausalitytests
+)
+from statsmodels.tsa.seasonal import seasonal_decompose
+from sklearn.preprocessing import StandardScaler
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+BASE_PATH = Path(r"C:\Users\ASUS\Desktop\Barnabus")
+OUTPUT_PATH = BASE_PATH / "layer3_output.json"
+OUTPUT_PATH.parent.mkdir(exist_ok=True, parents=True)
+
+DATA_PATH = BASE_PATH / "aggregated_data" / \
+    "agregate_Region_cleandata_with_vacc_dates_corrected.csv"
+
+TARGET_VAR = "Death_rate_100k"
+
+VACC_VARS = [
+    "persons_vaccinated_100k",
+    "fully_vaccinated_100k",
+    "vaccine_doses_administered_100k"
+]
+
+ALPHA = 0.05
+MAX_LAG = 8
+MIN_OBS_FORECAST = 50
+
+# =========================================================
+# JSON NORMALIZER (CRITICAL)
+# =========================================================
+def to_json_safe(obj):
+    """Recursively convert numpy / pandas objects to JSON-safe types."""
+    if isinstance(obj, dict):
+        return {k: to_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [to_json_safe(v) for v in obj]
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    elif isinstance(obj, (pd.Timestamp,)):
+        return obj.isoformat()
+    elif isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    elif isinstance(obj, StandardScaler):
+        return {"mean_": obj.mean_.tolist(), "scale_": obj.scale_.tolist()}
+    else:
+        return obj
+
+# =========================================================
+# TRACE ENGINE
+# =========================================================
+class DecisionTrace:
+    def __init__(self):
+        self.records = []
+
+    def add(self, step, message, details=None, confidence=None):
+        self.records.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "step": step,
+            "message": message,
+            "details": details,
+            "confidence": confidence
+        })
+
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
+def decide_differencing(series, alpha=0.05):
+    p0 = adfuller(series.dropna())[1]
+    if p0 < alpha:
+        return 0
+    p1 = adfuller(series.diff().dropna())[1]
+    if p1 < alpha:
+        return 1
+    return 2
+
+def detect_anomalies(series, alpha=0.05):
+    mu = series.mean()
+    sigma = series.std()
+    z = stats.norm.ppf(1 - alpha / 2)
+    return series[(series < mu - z * sigma) | (series > mu + z * sigma)]
+
+def detect_structural_breaks(series):
+    diffs = series.diff().abs()
+    threshold = diffs.mean() + 3 * diffs.std()
+    return diffs[diffs > threshold].index.tolist()
+
+# =========================================================
+# REGION ANALYSIS CORE
+# =========================================================
+def analyze_region(region, full_df):
+    trace = DecisionTrace()
+    region_df = (
+        full_df[full_df["WHO_region"] == region]
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+    candidate_models = []
+
+    try:
+        # -------------------------------
+        # DATA QUALITY & ANALYSIS (Same as before)
+        # -------------------------------
+        missing_ratio = region_df[TARGET_VAR].isna().mean()
+        trace.add("DATA_QUALITY", "Missing ratio calculated", {"missing_ratio": missing_ratio}, confidence=1 - missing_ratio)
+        desc = region_df[TARGET_VAR].describe().to_dict()
+        trace.add("DESCRIPTIVE", "Summary statistics computed", desc)
+        corr = region_df[[TARGET_VAR] + VACC_VARS].corr()[TARGET_VAR].to_dict()
+        trace.add("CORRELATION", "Correlation computed", corr)
+        adf_p = adfuller(region_df[TARGET_VAR].dropna())[1]
+        d_order = decide_differencing(region_df[TARGET_VAR])
+        trace.add("STATIONARITY", "ADF test executed", {"p_value": adf_p}, confidence=1 - adf_p)
+        trace.add("DIFFERENCING", "Differencing order decided", {"d_order": d_order}, confidence=0.9)
+        
+        seasonal = False
+        try:
+            dec = seasonal_decompose(region_df.set_index("date")[TARGET_VAR], period=52, model="additive")
+            seasonal = dec.seasonal.var() > 0
+        except Exception:
+            pass
+        trace.add("SEASONALITY", "Seasonality assessed", {"seasonal": seasonal})
+        
+        anomalies = detect_anomalies(region_df[TARGET_VAR])
+        breaks = detect_structural_breaks(region_df[TARGET_VAR])
+        trace.add("ANOMALY", "Anomalies detected", {"count": len(anomalies)})
+        trace.add("STRUCTURAL_BREAK", "Structural breaks detected", {"count": len(breaks)})
+        
+        granger = {}
+        for v in VACC_VARS:
+            try:
+                test = grangercausalitytests(region_df[[TARGET_VAR, v]].dropna(), maxlag=MAX_LAG, verbose=False)
+                pvals = [test[l][0]["ssr_ftest"][1] for l in test]
+                granger[v] = min(pvals)
+            except Exception:
+                granger[v] = None
+        trace.add("GRANGER", "Granger causality tested", granger)
+
+        # -------------------------------
+        # CANDIDATE MODEL GENERATION
+        # -------------------------------
+        stationary = adf_p < ALPHA
+        multivariate_ok = all(region_df[v].notna().sum() > 30 for v in VACC_VARS)
+
+        # 1. VAR Model Candidate
+        if multivariate_ok and stationary:
+            candidate_models.append({
+                "type": "VAR",
+                "config": {
+                    "target": TARGET_VAR,
+                    "exogenous": VACC_VARS,
+                    "max_lag": MAX_LAG
+                }
+            })
+            trace.add("MODEL_CANDIDATE", "VAR added as candidate", {"reason": "Multivariate and stationary"})
+
+        # 2. ARIMAX Model Candidate
+        if d_order <= 2:
+            scaler = None
+            scaler_params = None
+            try:
+                scaler = StandardScaler()
+             
+                vacc_data = region_df[VACC_VARS].ffill().bfill()
+                scaler.fit(vacc_data)
+                scaler_params = {"mean_": scaler.mean_.tolist(), "scale_": scaler.scale_.tolist()}
+            except Exception as e:
+                trace.add("SCALING_ERROR", f"Failed to fit scaler for ARIMAX: {e}")
+
+            candidate_models.append({
+                "type": "ARIMAX",
+                "config": {
+                    "target": TARGET_VAR,
+                    "exogenous": VACC_VARS,
+                    "differencing_order": d_order,
+                    "scaler_params": scaler_params
+                }
+            })
+            trace.add("MODEL_CANDIDATE", "ARIMAX added as candidate", {"d_order": d_order})
+
+        # 3. ARIMA Model Candidate (Univariate version of ARIMAX)
+        if d_order <= 2:
+            candidate_models.append({
+                "type": "ARIMA",
+                "config": {
+                    "target": TARGET_VAR,
+                    "differencing_order": d_order
+                }
+            })
+            trace.add("MODEL_CANDIDATE", "ARIMA added as candidate", {"d_order": d_order})
+
+        # 4. GARCH Model Candidate
+        if stationary:
+            candidate_models.append({
+                "type": "GARCH",
+                "config": {
+                    "target": TARGET_VAR,
+                    "p": 1,
+                    "q": 1
+                }
+            })
+            trace.add("MODEL_CANDIDATE", "GARCH added as candidate", {"reason": "Stationary series"})
+
+        # 5. ETS Model Candidate (Always a fallback)
+        candidate_models.append({
+            "type": "ETS",
+            "config": {
+                "target": TARGET_VAR
+            }
+        })
+        trace.add("MODEL_CANDIDATE", "ETS added as candidate", {"reason": "Fallback model"})
+
+        # -------------------------------
+        # FINAL REGION OUTPUT
+        # -------------------------------
+        return {
+            "region": region,
+            "candidate_models": candidate_models,
+            "differencing_order": d_order,
+            "decision_trace": trace.records
+        }
+
+    except Exception as e:
+        return {
+            "region": region,
+            "error": str(e),
+            "decision_trace": trace.records
+        }
+
+# =========================================================
+# EXECUTIVE SUMMARY & MAIN EXECUTION (Same as before)
+# =========================================================
+def generate_executive_summary(results):
+    summary = {
+        "total_regions_processed": 0,
+        "regions_with_errors": 0,
+        "total_candidates_generated": 0
+    }
+    for r in results:
+        if "error" in r:
+            summary["regions_with_errors"] += 1
+            continue
+        summary["total_regions_processed"] += 1
+        summary["total_candidates_generated"] += len(r.get("candidate_models", []))
+    return summary
+
+if __name__ == "__main__":
+    print("Starting Layer 3 execution...")
+    
+
+    if not DATA_PATH.exists():
+        print(f"Error: Input file not found at {DATA_PATH}")
+        exit(1)
+    
+    df = pd.read_csv(DATA_PATH, parse_dates=["date"])
+    regions = sorted(df["WHO_region"].dropna().unique())
+    results = []
+    for i, region in enumerate(regions, 1):
+        print(f"[{i}/{len(regions)}] Analyzing candidates for {region}")
+        results.append(analyze_region(region, df))
+
+    raw_output = {
+        "layer": 3,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "data_source": str(DATA_PATH),
+        "regions_processed": len(results),
+        "results": results,
+        "executive_summary": generate_executive_summary(results)
+    }
+
+    output = to_json_safe(raw_output)
+    
+
+    try:
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=4, ensure_ascii=False)
+        print(f"\nLayer 3 completed successfully.")
+        print(f"Output saved to: {OUTPUT_PATH}")
+        print(f"File size: {os.path.getsize(OUTPUT_PATH)} bytes")
+    except Exception as e:
+        print(f"Error saving output file: {e}")
+   
+        alt_path = Path.home() / "layer3_output.json"
+        try:
+            with open(alt_path, "w", encoding="utf-8") as f:
+                json.dump(output, f, indent=4, ensure_ascii=False)
+            print(f"Output saved to alternative path: {alt_path}")
+        except Exception as e2:
+            print(f"Failed to save to alternative path as well: {e2}")
+
