@@ -1,0 +1,1588 @@
+# LAYER 4 — GOVERNANCE & EXECUTION ###
+
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jan  2 13:49:55 2026
+
+@author: Mahnaz Nouri
+Enhanced with VAR/VECM modeling and advanced governance features
+Improved to handle vaccination data timeline correctly
+"""
+
+import json
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.statespace.varmax import VARMAX
+from statsmodels.tsa.vector_ar.vecm import coint_johansen, VECM
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.stattools import grangercausalitytests, adfuller
+from statsmodels.tsa.stattools import ccf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.gridspec import GridSpec
+from datetime import datetime, timedelta
+import warnings
+import logging
+import inspect
+import sys
+from sklearn.preprocessing import StandardScaler
+import statsmodels.api as sm
+from scipy import stats
+
+# Ignore statsmodels warnings for cleaner output
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# Set a modern seaborn style for better aesthetics
+sns.set_style("whitegrid")
+plt.rcParams['figure.max_open_warning'] = 0
+
+# Helper function to convert numpy/pandas types to JSON serializable types
+def convert_to_serializable(obj):
+    """Convert numpy/pandas types to standard Python types for JSON serialization."""
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, pd.Series):
+        return obj.tolist()
+    elif isinstance(obj, pd.DataFrame):
+        return obj.to_dict()
+    elif isinstance(obj, Path):
+        return str(obj)
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    else:
+        return obj
+
+# ============================================================
+# ENHANCED GOVERNANCE LAYER WITH STRUCTURED AUDIT LOGS
+# ============================================================
+
+class GovernanceLayer:
+    """
+    Enhanced Governance Layer for COVID-19 Data Analysis
+    Implements structured logging, decision tracing, and audit reporting.
+    """
+    def __init__(self, project_path: Path):
+        self.project_path = project_path
+        self.run_id = f"L4_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Create governance directory structure
+        self.governance_dir = self.project_path / "governance"
+        self.logs_dir = self.governance_dir / "logs"
+        self.reports_dir = self.governance_dir / "reports"
+        self.audit_dir = self.governance_dir / "audit"
+        
+        for dir_path in [self.governance_dir, self.logs_dir, self.reports_dir, self.audit_dir]:
+            dir_path.mkdir(parents=True, exist_ok=True)
+        
+        self.decisions_log = []
+        self.audit_logs = []
+        self.anomalies = []
+        self.metadata = {
+            "run_id": self.run_id,
+            "run_date": self.run_date,
+            "script_name": inspect.getfile(inspect.currentframe()),
+            "data_source": DATA_PATH,
+            "layer3_source": L3_PATH
+        }
+        
+        self._setup_logging()
+        self.log_event("SYSTEM", "Governance Layer initialized", self.metadata)
+
+    def _setup_logging(self):
+        """Setup logging configuration for both console and file."""
+        log_file = self.logs_dir / f"{self.run_id}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger("GovernanceLayer")
+
+    def log_event(self, category: str, description: str, details: dict = None, severity: str = "INFO"):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Convert all details to serializable format before creating the event
+        serializable_details = convert_to_serializable(details) if details else {}
+        
+        event = {
+            "timestamp": timestamp, "run_id": self.run_id, "category": category,
+            "description": description, "details": serializable_details, "severity": severity
+        }
+        with open(self.audit_dir / f"decisions_{self.run_id}.jsonl", 'a', encoding='utf-8') as f:
+            f.write(json.dumps(convert_to_serializable(event), ensure_ascii=False) + '\n')
+        log_method = getattr(self.logger, severity.lower(), self.logger.info)
+        log_method(f"[{category}] {description}")
+
+    def log_decision(self, decision_type: str, description: str, rationale: str, parameters: dict = None, outcome: str = None):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Convert parameters to serializable format
+        serializable_params = convert_to_serializable(parameters) if parameters else {}
+        
+        decision = {
+            "timestamp": timestamp, "run_id": self.run_id, "type": decision_type,
+            "description": description, "rationale": rationale,
+            "parameters": serializable_params, "outcome": outcome
+        }
+        self.decisions_log.append(decision)
+        self.log_event("DECISION", description, {"rationale": rationale, "parameters": serializable_params}, "INFO")
+
+    def log_audit(self, variable: str, issue: str, action: str, details: dict = None):
+        """Log structured audit information with timestamp, variable, issue, and action."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Convert details to serializable format
+        serializable_details = convert_to_serializable(details) if details else {}
+        
+        audit_entry = {
+            "timestamp": timestamp,
+            "run_id": self.run_id,
+            "variable": variable,
+            "issue": issue,
+            "action": action,
+            "details": serializable_details
+        }
+        self.audit_logs.append(audit_entry)
+        with open(self.audit_dir / f"audit_{self.run_id}.jsonl", 'a', encoding='utf-8') as f:
+            f.write(json.dumps(convert_to_serializable(audit_entry), ensure_ascii=False) + '\n')
+        self.log_event("AUDIT", f"Issue with {variable}: {issue}", {"action": action})
+
+    def log_anomaly(self, variable: str, anomaly_type: str, value: float, threshold: float, 
+                   explanation: str, suggested_action: str):
+        """Log anomalies with detailed information."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        anomaly = {
+            "timestamp": timestamp,
+            "run_id": self.run_id,
+            "variable": variable,
+            "type": anomaly_type,
+            "value": value,
+            "threshold": threshold,
+            "explanation": explanation,
+            "suggested_action": suggested_action
+        }
+        self.anomalies.append(anomaly)
+        self.log_event("ANOMALY", f"Anomaly detected in {variable}", 
+                      {"type": anomaly_type, "value": value, "threshold": threshold}, "WARNING")
+
+    def generate_governance_summary(self, validation_results: dict):
+        """Generate automated summary report with validation, anomalies, and corrective actions."""
+        summary_path = self.reports_dir / f"governance_summary_{self.run_id}.json"
+        
+        # Calculate data passing validation percentage
+        total_checks = sum(len(checks) for checks in validation_results.values())
+        passed_checks = sum(sum(1 for result in checks.values() if result) 
+                           for checks in validation_results.values())
+        validation_percentage = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
+        
+        # Get top 5 anomalies
+        top_anomalies = sorted(self.anomalies, 
+                             key=lambda x: abs(x['value'] - x['threshold']), 
+                             reverse=True)[:5]
+        
+        # Create root cause explanations and corrective actions
+        root_causes = []
+        corrective_actions = []
+        
+        for anomaly in top_anomalies:
+            root_causes.append({
+                "anomaly": f"{anomaly['variable']} ({anomaly['type']})",
+                "explanation": anomaly['explanation']
+            })
+            corrective_actions.append({
+                "anomaly": f"{anomaly['variable']} ({anomaly['type']})",
+                "action": anomaly['suggested_action']
+            })
+        
+        summary = {
+            "run_id": self.run_id,
+            "run_date": self.run_date,
+            "data_validation_percentage": validation_percentage,
+            "total_checks": total_checks,
+            "passed_checks": passed_checks,
+            "top_anomalies": top_anomalies,
+            "root_causes": root_causes,
+            "corrective_actions": corrective_actions,
+            "metadata": self.metadata
+        }
+        
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(convert_to_serializable(summary), f, indent=2, ensure_ascii=False)
+        
+        self.log_event("REPORT", "Governance summary generated", {"path": str(summary_path)})
+        return summary_path, summary
+
+    def generate_audit_report(self):
+        report_path = self.reports_dir / f"audit_report_{self.run_id}.md"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("# Layer 4: Governance & Execution Audit Report\n\n")
+            f.write(f"**Run ID:** `{self.run_id}`  \n")
+            f.write(f"**Generated on:** {self.run_date}  \n\n")
+            f.write("## Metadata\n\n```json\n")
+            f.write(json.dumps(convert_to_serializable(self.metadata), indent=2))
+            f.write("\n```\n\n")
+            f.write("## Decision Trace\n\n")
+            if not self.decisions_log:
+                f.write("No decisions were logged during this run.\n")
+            else:
+                for i, dec in enumerate(self.decisions_log, 1):
+                    f.write(f"### Decision {i}: {dec['type']}\n\n")
+                    f.write(f"- **Description:** {dec['description']}\n")
+                    f.write(f"- **Rationale:** {dec['rationale']}\n")
+                    if dec['parameters']:
+                        f.write(f"- **Parameters:**\n```json\n{json.dumps(convert_to_serializable(dec['parameters']), indent=2)}\n```\n")
+                    if dec['outcome']:
+                        f.write(f"- **Outcome:** {dec['outcome']}\n")
+                    f.write("\n---\n")
+            
+            f.write("## Audit Logs\n\n")
+            if not self.audit_logs:
+                f.write("No audit events were logged during this run.\n")
+            else:
+                for i, log in enumerate(self.audit_logs, 1):
+                    f.write(f"### Audit Event {i}: {log['variable']}\n\n")
+                    f.write(f"- **Timestamp:** {log['timestamp']}\n")
+                    f.write(f"- **Variable:** {log['variable']}\n")
+                    f.write(f"- **Issue:** {log['issue']}\n")
+                    f.write(f"- **Action:** {log['action']}\n")
+                    if log['details']:
+                        f.write(f"- **Details:**\n```json\n{json.dumps(convert_to_serializable(log['details']), indent=2)}\n```\n")
+                    f.write("\n---\n")
+            
+            f.write("## Anomalies Detected\n\n")
+            if not self.anomalies:
+                f.write("No anomalies were detected during this run.\n")
+            else:
+                for i, anomaly in enumerate(self.anomalies, 1):
+                    f.write(f"### Anomaly {i}: {anomaly['variable']}\n\n")
+                    f.write(f"- **Timestamp:** {anomaly['timestamp']}\n")
+                    f.write(f"- **Variable:** {anomaly['variable']}\n")
+                    f.write(f"- **Type:** {anomaly['type']}\n")
+                    f.write(f"- **Value:** {anomaly['value']}\n")
+                    f.write(f"- **Threshold:** {anomaly['threshold']}\n")
+                    f.write(f"- **Explanation:** {anomaly['explanation']}\n")
+                    f.write(f"- **Suggested Action:** {anomaly['suggested_action']}\n")
+                    f.write("\n---\n")
+        
+        self.log_event("SYSTEM", "Audit report generated", {"path": str(report_path)})
+        print(f"Audit report generated at: {report_path}")
+        return report_path
+
+    def generate_governance_pdf_report(self, summary_path: str, audit_path: str, output_path: str):
+        """Generate a comprehensive governance report in PDF format."""
+        with PdfPages(output_path) as pdf:
+            # Title Page
+            fig = plt.figure(figsize=(8, 11))
+            fig.text(0.5, 0.9, "Governance & Execution Report", ha='center', fontsize=24, fontweight='bold')
+            fig.text(0.5, 0.85, "COVID-19 Data Analysis (Layer 4)", ha='center', fontsize=18)
+            fig.text(0.5, 0.8, f"Run ID: {self.run_id}", ha='center', fontsize=14)
+            fig.text(0.5, 0.75, f"Generated on: {self.run_date}", ha='center', fontsize=12)
+            fig.text(0.5, 0.1, "Enhanced with VAR/VECM Modeling", ha='center', fontsize=14, style='italic', color='gray')
+            pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+            plt.close(fig)
+            
+            # Load summary data
+            with open(summary_path, 'r', encoding='utf-8') as f:
+                summary = json.load(f)
+            
+            # Executive Summary
+            fig = plt.figure(figsize=(8, 11))
+            fig.text(0.1, 0.9, "Executive Summary", fontsize=20, fontweight='bold')
+            
+            summary_text = (
+                f"Data Validation: {summary['data_validation_percentage']:.1f}% "
+                f"({summary['passed_checks']}/{summary['total_checks']} checks passed)\n\n"
+                f"Top Anomalies Detected: {len(summary['top_anomalies'])}\n"
+                f"Total Audit Events: {len(self.audit_logs)}\n"
+                f"Total Decisions: {len(self.decisions_log)}"
+            )
+            
+            fig.text(0.1, 0.8, summary_text, fontsize=12, wrap=True)
+            
+            # Top 5 Anomalies
+            fig.text(0.1, 0.6, "Top 5 Anomalies", fontsize=16, fontweight='bold')
+            for i, anomaly in enumerate(summary['top_anomalies'][:5], 1):
+                anomaly_text = (
+                    f"{i}. {anomaly['variable']} ({anomaly['type']}): "
+                    f"Value {anomaly['value']:.4f} exceeds threshold {anomaly['threshold']:.4f}\n"
+                    f"   Explanation: {anomaly['explanation']}\n"
+                    f"   Suggested Action: {anomaly['suggested_action']}\n"
+                )
+                fig.text(0.1, 0.55 - i*0.08, anomaly_text, fontsize=10, wrap=True)
+            
+            pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+            plt.close(fig)
+            
+            # Corrective Actions
+            fig = plt.figure(figsize=(8, 11))
+            fig.text(0.1, 0.9, "Recommended Corrective Actions", fontsize=20, fontweight='bold')
+            
+            for i, action in enumerate(summary['corrective_actions'][:5], 1):
+                action_text = (
+                    f"{i}. For {action['anomaly']}:\n"
+                    f"   {action['action']}\n"
+                )
+                fig.text(0.1, 0.8 - i*0.12, action_text, fontsize=11, wrap=True)
+            
+            pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+            plt.close(fig)
+            
+            # Detailed Audit Log (if not too long)
+            if len(self.audit_logs) <= 20:
+                fig, ax = plt.subplots(figsize=(8, 11))
+                ax.axis('tight')
+                ax.axis('off')
+                
+                audit_data = []
+                for log in self.audit_logs:
+                    audit_data.append([
+                        log['timestamp'],
+                        log['variable'],
+                        log['issue'],
+                        log['action']
+                    ])
+                
+                table = ax.table(cellText=audit_data, 
+                                colLabels=['Timestamp', 'Variable', 'Issue', 'Action'],
+                                cellLoc='center', loc='center')
+                table.auto_set_font_size(False)
+                table.set_fontsize(9)
+                table.scale(1.0, 1.5)
+                
+                plt.title("Detailed Audit Log", fontsize=16, fontweight='bold', pad=20)
+                pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+                plt.close(fig)
+        
+        # Convert Path object to string for logging
+        output_path_str = str(output_path)
+        self.log_event("REPORT", "Governance PDF report generated", {"path": output_path_str})
+        print(f"Governance PDF report generated at: {output_path}")
+        return output_path
+
+
+# ============================================================
+# MODELING FUNCTIONS WITH VAR/VECM AND ENHANCED LAG SELECTION
+# ============================================================
+
+def select_optimal_lag(y, max_lag=60, criterion='aic'):
+    """
+    Select optimal lag based on AIC, BIC, or HQIC.
+    
+    Parameters:
+    - y: time series data
+    - max_lag: maximum lag to consider
+    - criterion: 'aic', 'bic', or 'hqic'
+    
+    Returns:
+    - optimal lag value
+    """
+    try:
+        # Use AutoReg instead of deprecated AR
+        from statsmodels.tsa.ar_model import AutoReg
+        
+        aic_values = []
+        bic_values = []
+        hqic_values = []
+        
+        for lag in range(1, max_lag + 1):
+            model = AutoReg(y, lags=lag).fit()
+            aic_values.append(model.aic)
+            bic_values.append(model.bic)
+            hqic_values.append(model.hqic)
+        
+        if criterion == 'aic':
+            optimal_lag = np.argmin(aic_values) + 1
+        elif criterion == 'bic':
+            optimal_lag = np.argmin(bic_values) + 1
+        elif criterion == 'hqic':
+            optimal_lag = np.argmin(hqic_values) + 1
+        else:
+            optimal_lag = np.argmin(aic_values) + 1
+        
+        return optimal_lag
+    except Exception as e:
+        print(f"Error in lag selection: {e}")
+        return 14  # Default to 14 days if error occurs
+
+def check_stationarity(series, signif=0.05):
+    """
+    Check if a time series is stationary using ADF test.
+    
+    Parameters:
+    - series: time series data
+    - signif: significance level
+    
+    Returns:
+    - is_stationary: boolean
+    - p_value: float
+    """
+    result = adfuller(series)
+    p_value = result[1]
+    is_stationary = p_value < signif
+    return is_stationary, p_value
+
+def check_cointegration(y, x, maxlag=5, signif=0.05):
+    """
+    Check if two time series are cointegrated using Johansen test.
+    
+    Parameters:
+    - y, x: time series data
+    - maxlag: maximum lag for the test
+    - signif: significance level
+    
+    Returns:
+    - is_cointegrated: boolean
+    - test_statistic: float
+    - critical_values: array
+    """
+    try:
+        # Combine series into a DataFrame
+        data = pd.concat([y, x], axis=1).dropna()
+        
+        # Perform Johansen test
+        result = coint_johansen(data, det_order=0, k_ar_diff=maxlag)
+        
+        # Get test statistic and critical values
+        test_statistic = result.lr1[0]  # First eigenvalue statistic
+        critical_values = result.cvt[:, 0]  # 90%, 95%, 99% critical values
+        
+        # Check if test statistic exceeds 95% critical value
+        is_cointegrated = test_statistic > critical_values[1]
+        
+        return is_cointegrated, test_statistic, critical_values
+    except Exception as e:
+        print(f"Error in cointegration test: {e}")
+        return False, 0, [0, 0, 0]
+
+def fit_sarimax_model(y, exog, order, seasonal_order=(0, 0, 0, 0), 
+                     enforce_stationarity=False, enforce_invertibility=False):
+    """
+    Fit a SARIMAX model with the given parameters.
+    
+    Parameters:
+    - y: endogenous variable
+    - exog: exogenous variables
+    - order: (p, d, q) order of the model
+    - seasonal_order: (P, D, Q, s) seasonal order
+    - enforce_stationarity: whether to enforce stationarity
+    - enforce_invertibility: whether to enforce invertibility
+    
+    Returns:
+    - fitted model
+    """
+    try:
+        model = SARIMAX(
+            y, 
+            exog=exog,
+            order=order,
+            seasonal_order=seasonal_order,
+            enforce_stationarity=enforce_stationarity,
+            enforce_invertibility=enforce_invertibility
+        )
+        fitted_model = model.fit(disp=False)
+        return fitted_model
+    except Exception as e:
+        print(f"Error fitting SARIMAX model: {e}")
+        return None
+
+def fit_var_model(data, maxlags=15, ic='aic'):
+    """
+    Fit a VAR model with automatic lag selection.
+    
+    Parameters:
+    - data: DataFrame with time series data
+    - maxlags: maximum number of lags to consider
+    - ic: information criterion for lag selection ('aic', 'bic', 'hqic', 'fpe')
+    
+    Returns:
+    - fitted model
+    - selected lag
+    """
+    try:
+        model = sm.tsa.VAR(data)
+        lag_selection = model.select_order(maxlags=maxlags)
+        selected_lag = lag_selection.aic if ic == 'aic' else lag_selection.bic if ic == 'bic' else lag_selection.hqic
+        fitted_model = model.fit(selected_lag)
+        return fitted_model, selected_lag
+    except Exception as e:
+        print(f"Error fitting VAR model: {e}")
+        return None, None
+
+def fit_vecm_model(data, deterministic='ci', k_ar_diff=None):
+    """
+    Fit a VECM model for cointegrated time series.
+    
+    Parameters:
+    - data: DataFrame with cointegrated time series
+    - deterministic: deterministic terms ('nc', 'ci', 'li', 'lo')
+    - k_ar_diff: number of lags in the VECM
+    
+    Returns:
+    - fitted model
+    """
+    try:
+        # Ensure k_ar_diff is not None
+        if k_ar_diff is None:
+            k_ar_diff = 1  # Default to 1 lag if not specified
+        
+        model = VECM(data, deterministic=deterministic, k_ar_diff=k_ar_diff)
+        fitted_model = model.fit()
+        return fitted_model
+    except Exception as e:
+        print(f"Error fitting VECM model: {e}")
+        return None
+
+def granger_causality_test(y, x, maxlag=5, signif=0.05):
+    """
+    Perform Granger causality test to determine if x causes y.
+    
+    Parameters:
+    - y: effect time series
+    - x: cause time series
+    - maxlag: maximum lag to consider
+    - signif: significance level
+    
+    Returns:
+    - is_causal: boolean
+    - min_p_value: minimum p-value across all lags
+    """
+    try:
+        data = pd.concat([y, x], axis=1).dropna()
+        test_result = grangercausalitytests(data, maxlag=maxlag, verbose=False)
+        
+        # Extract p-values
+        p_values = [test_result[i+1][0]['ssr_ftest'][1] for i in range(maxlag)]
+        min_p_value = min(p_values)
+        is_causal = min_p_value < signif
+        
+        return is_causal, min_p_value
+    except Exception as e:
+        print(f"Error in Granger causality test: {e}")
+        return False, 1.0
+
+def cross_correlation_analysis(y, x, max_lag=60):
+    """
+    Analyze cross-correlation between two time series.
+    
+    Parameters:
+    - y, x: time series data
+    - max_lag: maximum lag to consider
+    
+    Returns:
+    - ccf_values: array of cross-correlation values
+    - optimal_lag: lag with maximum absolute correlation
+    """
+    try:
+        # Standardize the series
+        scaler = StandardScaler()
+        y_std = scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
+        x_std = scaler.fit_transform(x.values.reshape(-1, 1)).flatten()
+        
+        # Calculate cross-correlation
+        ccf_values = ccf(y_std, x_std, adjusted=False)[:max_lag+1]
+        
+        # Find lag with maximum absolute correlation
+        optimal_lag = np.argmax(np.abs(ccf_values))
+        
+        return ccf_values, optimal_lag
+    except Exception as e:
+        print(f"Error in cross-correlation analysis: {e}")
+        return np.zeros(max_lag+1), 0
+
+# ============================================================
+# PATHS
+# ============================================================
+ROOT_OUTPUT_DIR = Path(r"C:\Users\ASUS\Desktop\Barnabus\layer4_output_enhanced_v4")
+ROOT_OUTPUT_DIR.mkdir(exist_ok=True)
+
+PLOT_OUTPUT_DIR = ROOT_OUTPUT_DIR / "plots"
+CSV_OUTPUT_DIR = ROOT_OUTPUT_DIR / "csv"
+JSON_OUTPUT_DIR = ROOT_OUTPUT_DIR / "json"
+ANALYTICAL_REPORTS_DIR = ROOT_OUTPUT_DIR / "reports"
+PDF_OUTPUT_DIR = ROOT_OUTPUT_DIR / "pdf"
+
+GOVERNANCE_DIR = ROOT_OUTPUT_DIR / "governance"
+GOVERNANCE_LOGS_DIR = GOVERNANCE_DIR / "logs"
+GOVERNANCE_REPORTS_DIR = GOVERNANCE_DIR / "reports"
+GOVERNANCE_AUDIT_DIR = GOVERNANCE_DIR / "audit"
+
+for dir_path in [PLOT_OUTPUT_DIR, CSV_OUTPUT_DIR, JSON_OUTPUT_DIR, ANALYTICAL_REPORTS_DIR, PDF_OUTPUT_DIR, 
+                 GOVERNANCE_DIR, GOVERNANCE_LOGS_DIR, GOVERNANCE_REPORTS_DIR, GOVERNANCE_AUDIT_DIR]:
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+DATA_PATH = r"C:\Users\ASUS\Desktop\Barnabus\aggregated_data\agregate_Region_cleandata_with_vacc_dates_corrected.csv"
+L3_PATH   = r"C:\Users\ASUS\Desktop\Barnabus\layer3_output.json"
+
+governance = GovernanceLayer(project_path=ROOT_OUTPUT_DIR)
+
+# ------------------------------------------------------------
+# LOAD DATA
+# ------------------------------------------------------------
+try:
+    df = pd.read_csv(DATA_PATH, parse_dates=["date", "vaccination_start_date"])
+    df.sort_values(["WHO_region", "date"], inplace=True)
+    governance.log_event("DATA_LOADING", "Data loaded successfully", {"shape": df.shape, "source": DATA_PATH})
+except FileNotFoundError as e:
+    governance.log_event("ERROR", f"Data file not found: {DATA_PATH}", {"error": str(e)}, "ERROR")
+    sys.exit()
+
+try:
+    with open(L3_PATH, "r", encoding="utf-8") as f:
+        layer3_json = json.load(f)
+    governance.log_event("DATA_LOADING", "Layer 3 JSON loaded successfully", {"source": L3_PATH})
+except FileNotFoundError as e:
+    governance.log_event("ERROR", f"Layer 3 file not found: {L3_PATH}", {"error": str(e)}, "ERROR")
+    sys.exit()
+
+# ------------------------------------------------------------
+# IMPROVED DATA VALIDATION - HANDLING VACCINATION TIMELINE CORRECTLY
+# ------------------------------------------------------------
+validation_results = {
+    "missing_values": {},
+    "outliers": {},
+    "stationarity": {},
+    "normality": {},
+    "vaccination_timeline": {}
+}
+
+# Log information about vaccination timeline
+min_vacc_date = df['vaccination_start_date'].min()
+max_vacc_date = df['vaccination_start_date'].max()
+min_covid_date = df['date'].min()
+max_covid_date = df['date'].max()
+
+# Convert dates to strings before logging
+governance.log_event("DATA_VALIDATION", "Vaccination timeline analysis", {
+    "min_covid_date": str(min_covid_date),
+    "max_covid_date": str(max_covid_date),
+    "min_vaccination_date": str(min_vacc_date),
+    "max_vaccination_date": str(max_vacc_date),
+    "days_before_vaccination": (min_vacc_date - min_covid_date).days if pd.notna(min_vacc_date) else None
+})
+
+# Check for missing values in non-vaccination columns only
+non_vacc_cols = [col for col in df.select_dtypes(include=[np.number]).columns 
+                 if not any(vacc_term in col.lower() for vacc_term in ['vaccinated', 'vaccine', 'dose'])]
+
+for col in non_vacc_cols:
+    missing_pct = df[col].isnull().sum() / len(df) * 100
+    validation_results["missing_values"][col] = missing_pct < 5  # Pass if less than 5% missing
+    
+    if missing_pct >= 5:
+        governance.log_audit(
+            variable=col,
+            issue=f"High percentage of missing values ({missing_pct:.2f}%)",
+            action="Imputation with median value"
+        )
+        df[col].fillna(df[col].median(), inplace=True)
+        
+        governance.log_anomaly(
+            variable=col,
+            anomaly_type="Missing Values",
+            value=missing_pct,
+            threshold=5.0,
+            explanation=f"The column {col} has a high percentage of missing values, which may bias the analysis.",
+            suggested_action="Consider data collection improvements or alternative imputation methods."
+        )
+
+# Check vaccination data availability by region
+for region in df["WHO_region"].unique():
+    region_data = df[df["WHO_region"] == region].copy()
+    vacc_start_date = region_data['vaccination_start_date'].min()
+    
+    # Count days with vaccination data
+    vacc_cols = ['fully_vaccinated_100k', 'persons_vaccinated_100k', 'vaccine_doses_administered_100k']
+    vacc_data_available = 0
+    total_days_after_vacc = 0
+    
+    if pd.notna(vacc_start_date):
+        vacc_period = region_data[region_data['date'] >= vacc_start_date]
+        total_days_after_vacc = len(vacc_period)
+        
+        for col in vacc_cols:
+            if col in vacc_period.columns:
+                vacc_data_count = vacc_period[col].notna().sum()
+                vacc_data_available = max(vacc_data_available, vacc_data_count)
+        
+        vacc_coverage = (vacc_data_available / total_days_after_vacc * 100) if total_days_after_vacc > 0 else 0
+        validation_results["vaccination_timeline"][f"{region}_coverage"] = vacc_coverage > 80  # Pass if >80% coverage
+        
+        if vacc_coverage < 80:
+            governance.log_audit(
+                variable=f"{region}_vaccination_data",
+                issue=f"Low vaccination data coverage ({vacc_coverage:.1f}%) after vaccination start date",
+                action="Analysis will focus on available vaccination period"
+            )
+    
+    # Check for outliers in all numeric columns
+    for col in df.select_dtypes(include=[np.number]).columns:
+        # Only check outliers in the relevant time period for vaccination data
+        if col in vacc_cols and pd.notna(vacc_start_date):
+            check_data = region_data[region_data['date'] >= vacc_start_date][col]
+        else:
+            check_data = region_data[col]
+        
+        if len(check_data) > 0:
+            z_scores = np.abs(stats.zscore(check_data.dropna()))
+            outliers_pct = (z_scores > 3).sum() / len(z_scores) * 100
+            validation_results["outliers"][f"{region}_{col}"] = outliers_pct < 5  # Pass if less than 5% outliers
+            
+            if outliers_pct >= 5:
+                governance.log_audit(
+                    variable=f"{region}_{col}",
+                    issue=f"High percentage of outliers ({outliers_pct:.2f}%)",
+                    action="Winsorization at 1st and 99th percentiles"
+                )
+                
+                # Winsorize the data
+                lower_bound = check_data.quantile(0.01)
+                upper_bound = check_data.quantile(0.99)
+                df.loc[region_data.index, col] = df.loc[region_data.index, col].clip(lower=lower_bound, upper=upper_bound)
+                
+                governance.log_anomaly(
+                    variable=f"{region}_{col}",
+                    anomaly_type="Outliers",
+                    value=outliers_pct,
+                    threshold=5.0,
+                    explanation=f"The column {col} in {region} contains a high percentage of outliers, which may affect model performance.",
+                    suggested_action="Consider robust modeling techniques or further investigation of extreme values."
+                )
+
+# Check stationarity for key variables (only in periods with sufficient data)
+for region in df["WHO_region"].unique():
+    region_data = df[df["WHO_region"] == region].copy()
+    region_data.set_index("date", inplace=True)
+    vacc_start_date = region_data['vaccination_start_date'].min()
+    
+    # For death rate, check from the beginning
+    for var in ["Death_rate_100k"]:
+        if var in region_data.columns and len(region_data) > 30:
+            is_stationary, p_value = check_stationarity(region_data[var])
+            validation_results["stationarity"][f"{region}_{var}"] = is_stationary
+            
+            if not is_stationary:
+                governance.log_audit(
+                    variable=f"{region}_{var}",
+                    issue=f"Non-stationary time series (p-value: {p_value:.4f})",
+                    action="Apply differencing in modeling"
+                )
+                
+                governance.log_anomaly(
+                    variable=f"{region}_{var}",
+                    anomaly_type="Non-stationarity",
+                    value=p_value,
+                    threshold=0.05,
+                    explanation=f"The time series for {var} in {region} is non-stationary, which can lead to spurious regression results.",
+                    suggested_action="Apply appropriate differencing or transformation before modeling."
+                )
+    
+    # For vaccination variables, check only after vaccination start date
+    if pd.notna(vacc_start_date):
+        vacc_period = region_data[region_data.index >= vacc_start_date]
+        for var in ["fully_vaccinated_100k", "persons_vaccinated_100k", "vaccine_doses_administered_100k"]:
+            if var in vacc_period.columns and len(vacc_period) > 30:
+                is_stationary, p_value = check_stationarity(vacc_period[var])
+                validation_results["stationarity"][f"{region}_{var}"] = is_stationary
+                
+                if not is_stationary:
+                    governance.log_audit(
+                        variable=f"{region}_{var}",
+                        issue=f"Non-stationary time series (p-value: {p_value:.4f})",
+                        action="Apply differencing in modeling"
+                    )
+
+# ------------------------------------------------------------
+# ADAPTER: LAYER 3 → LAYER 4 CONTRACT
+# ------------------------------------------------------------
+def extract_decisions(layer3_json):
+    if isinstance(layer3_json, dict) and "results" in layer3_json:
+        return layer3_json["results"]
+    else:
+        raise ValueError("Layer 3 JSON is not in the expected format. Missing 'results' key.")
+
+try:
+    decisions = extract_decisions(layer3_json)
+    governance.log_event("DATA_PREPARATION", f"Extracted decisions for {len(decisions)} regions from Layer 3.")
+except ValueError as e:
+    governance.log_event("ERROR", "Failed to extract decisions from Layer 3 JSON", {"error": str(e)}, "ERROR")
+    sys.exit()
+
+# ------------------------------------------------------------
+# EXECUTION WITH ENHANCED MODELING - CONSIDERING VACCINATION TIMELINE
+# ------------------------------------------------------------
+results = []
+sensitivity = []
+fitted_models = {}
+model_execution_details = []
+causality_results = []
+cross_corr_results = []
+
+governance.log_event("MODELING", "Starting enhanced model fitting loop with VAR/VECM.")
+
+for dec in decisions:
+    region = dec.get("region")
+    if not region:
+        governance.log_event("MODELING", "Skipping decision entry due to missing 'region' key.", severity="WARNING")
+        continue
+    
+    d_order = dec.get("differencing_order", 0)
+    exogs = ["fully_vaccinated_100k", "persons_vaccinated_100k", "vaccine_doses_administered_100k"]
+    
+    governance.log_event("MODELING", f"Processing region: {region}", {"d_order": d_order, "exogs": exogs})
+    
+    dfr = df[df["WHO_region"] == region].copy()
+    dfr.set_index("date", inplace=True)
+    
+    if dfr.empty:
+        governance.log_event("MODELING", f"No data found for region {region} in the CSV. Skipping.", {"region": region}, severity="WARNING")
+        continue
+    
+    # Get vaccination start date for this region
+    vacc_start_date = dfr['vaccination_start_date'].min()
+    
+    # Filter data to start from vaccination date for vaccination-related analysis
+    if pd.notna(vacc_start_date):
+        analysis_data = dfr[dfr.index >= vacc_start_date].copy()
+        governance.log_event("MODELING", f"Analyzing {region} from vaccination start date: {vacc_start_date}", 
+                            {"data_points": len(analysis_data)})
+    else:
+        analysis_data = dfr.copy()
+        governance.log_event("MODELING", f"No vaccination start date found for {region}, using all data", 
+                            {"data_points": len(analysis_data)})
+    
+    if len(analysis_data) < 30:
+        reason = f"Insufficient data points after vaccination start ({len(analysis_data)} < 30)"
+        governance.log_event("MODELING", f"Skipping region {region}", {"region": region, "reason": reason})
+        continue
+    
+    y = analysis_data["Death_rate_100k"]
+    fitted_models[region] = {}
+    
+    # Enhanced lag selection
+    optimal_lag = select_optimal_lag(y, max_lag=60, criterion='aic')
+    governance.log_event("MODELING", f"Optimal lag selected for {region}: {optimal_lag} days", 
+                        {"method": "AIC minimization"})
+    
+    # Cross-correlation analysis
+    for exog in exogs:
+        if exog in analysis_data.columns:
+            ccf_values, optimal_lag_ccf = cross_correlation_analysis(y, analysis_data[exog], max_lag=60)
+            cross_corr_results.append({
+                "Region": region,
+                "Variable": exog,
+                "Optimal_Lag": optimal_lag_ccf,
+                "Max_Correlation": np.max(np.abs(ccf_values))
+            })
+    
+    # Granger causality tests
+    for exog in exogs:
+        if exog in analysis_data.columns:
+            is_causal, p_value = granger_causality_test(y, analysis_data[exog], maxlag=5)
+            causality_results.append({
+                "Region": region,
+                "Cause": exog,
+                "Effect": "Death_rate_100k",
+                "Is_Causal": is_causal,
+                "Min_P_Value": p_value
+            })
+    
+    # Check for cointegration with vaccination variables
+    cointegration_results = {}
+    for exog in exogs:
+        if exog in analysis_data.columns:
+            is_cointegrated, test_stat, crit_values = check_cointegration(y, analysis_data[exog])
+            cointegration_results[exog] = {
+                "is_cointegrated": is_cointegrated,
+                "test_statistic": test_stat,
+                "critical_values": crit_values
+            }
+    
+    # Fit SARIMAX models with different lags
+    lags = [optimal_lag, 14, 28, 42]  # Include optimal lag and standard lags
+    
+    for lag in lags:
+        X = pd.DataFrame(index=analysis_data.index)
+        for v in exogs:
+            X[f"{v}_lag{lag}"] = analysis_data[v].shift(lag)
+        
+        data = pd.concat([y, X], axis=1).dropna()
+        if len(data) < 30:
+            reason = f"Insufficient data points after lagging ({len(data)} < 30)"
+            governance.log_event("MODELING", f"Skipping lag {lag} for {region}", 
+                                {"region": region, "lag": lag, "reason": reason})
+            governance.log_decision("MODEL_SKIPPED", f"Model for {region} lag {lag} was skipped", 
+                                   reason, {"lag": lag, "data_points": len(data)})
+            model_execution_details.append({
+                "Region": region, 
+                "Lag": lag, 
+                "Model_Type": "SARIMAX",
+                "Status": "Failed", 
+                "Reason": reason
+            })
+            continue
+        
+        try:
+            # Fit SARIMAX model with deterministic terms
+            model = SARIMAX(
+                data["Death_rate_100k"], 
+                exog=data[X.columns], 
+                order=(1, d_order, 1), 
+                seasonal_order=(0, 0, 0, 0),
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+                trend='c'  # Include constant term
+            ).fit(disp=False)
+            
+            resid = model.resid
+            lb_p = acorr_ljungbox(resid, lags=[10], return_df=True)["lb_pvalue"].iloc[0]
+            effect_params = model.params.filter(like="fully_vaccinated_100k")
+            effect = effect_params.mean() if not effect_params.empty else np.nan
+            pval_params = model.pvalues.filter(like="fully_vaccinated_100k")
+            pval = pval_params.mean() if not pval_params.empty else np.nan
+            
+            results.append({
+                "Region": region, 
+                "Lag": lag, 
+                "D_Order": d_order, 
+                "Model_Type": "SARIMAX",
+                "Effect": effect, 
+                "p_value": pval, 
+                "AIC": model.aic, 
+                "RMSE": np.sqrt(np.mean(resid**2)), 
+                "Residuals_white": lb_p > 0.05,
+                "Lag_Selection_Method": "AIC" if lag == optimal_lag else "Fixed",
+                "Vaccination_Start_Date": str(vacc_start_date) if pd.notna(vacc_start_date) else None,
+                "Analysis_Period_Days": len(analysis_data)
+            })
+            
+            sensitivity.append({
+                "Region": region, 
+                "Lag": lag, 
+                "Effect": effect,
+                "Model_Type": "SARIMAX"
+            })
+            
+            fitted_models[region][f"SARIMAX_{lag}"] = model
+            
+            outcome_text = f"Effect: {effect:.4f}, AIC: {model.aic:.2f}"
+            governance.log_decision("MODEL_FIT_SUCCESS", f"SARIMAX model fitted for {region} lag {lag}", 
+                                   "Model converged and parameters were estimated.", 
+                                   {"order": (1, d_order, 1), "aic": model.aic, "p_value": pval}, 
+                                   outcome_text)
+            
+            model_execution_details.append({
+                "Region": region, 
+                "Lag": lag, 
+                "Model_Type": "SARIMAX",
+                "Status": "Success", 
+                "Reason": "N/A"
+            })
+        except Exception as e:
+            error_text = f"Failed to fit SARIMAX for {region} at lag {lag}"
+            governance.log_event("MODELING", error_text, 
+                                {"region": region, "lag": lag, "error": str(e)}, "ERROR")
+            governance.log_decision("MODEL_FIT_FAILED", error_text, 
+                                   f"An exception occurred during model fitting.", 
+                                   {"error": str(e)}, "Failed")
+            
+            model_execution_details.append({
+                "Region": region, 
+                "Lag": lag, 
+                "Model_Type": "SARIMAX",
+                "Status": "Failed", 
+                "Reason": str(e)
+            })
+            continue
+    
+    # Fit VAR model if sufficient data
+    if len(analysis_data) > 60:  # Need sufficient data for VAR
+        try:
+            # Prepare data for VAR
+            var_data = analysis_data[["Death_rate_100k"] + exogs].dropna()
+            
+            # Fit VAR model
+            var_model, var_lag = fit_var_model(var_data, maxlags=15, ic='aic')
+            
+            if var_model is not None:
+                # Get impulse response functions
+                irf = var_model.irf(10)
+                
+                # Store results
+                results.append({
+                    "Region": region,
+                    "Lag": var_lag,
+                    "D_Order": 0,
+                    "Model_Type": "VAR",
+                    "Effect": np.nan,  # VAR doesn't have a single effect parameter
+                    "p_value": np.nan,
+                    "AIC": var_model.aic,
+                    "RMSE": np.nan,  # VAR has multiple equations
+                    "Residuals_white": np.nan,
+                    "Lag_Selection_Method": "AIC",
+                    "Vaccination_Start_Date": str(vacc_start_date) if pd.notna(vacc_start_date) else None,
+                    "Analysis_Period_Days": len(analysis_data)
+                })
+                
+                fitted_models[region]["VAR"] = var_model
+                
+                governance.log_decision("MODEL_FIT_SUCCESS", f"VAR model fitted for {region} with lag {var_lag}", 
+                                       "VAR model converged and parameters were estimated.", 
+                                       {"aic": var_model.aic, "lag": var_lag}, 
+                                       f"AIC: {var_model.aic:.2f}")
+                
+                model_execution_details.append({
+                    "Region": region,
+                    "Lag": var_lag,
+                    "Model_Type": "VAR",
+                    "Status": "Success",
+                    "Reason": "N/A"
+                })
+        except Exception as e:
+            error_text = f"Failed to fit VAR for {region}"
+            governance.log_event("MODELING", error_text, 
+                                {"region": region, "error": str(e)}, "ERROR")
+            governance.log_decision("MODEL_FIT_FAILED", error_text, 
+                                   f"An exception occurred during VAR fitting.", 
+                                   {"error": str(e)}, "Failed")
+            
+            model_execution_details.append({
+                "Region": region,
+                "Lag": np.nan,
+                "Model_Type": "VAR",
+                "Status": "Failed",
+                "Reason": str(e)
+            })
+    
+    # Fit VECM model if cointegration is detected
+    cointegrated_exogs = [exog for exog in exogs 
+                         if exog in cointegration_results and cointegration_results[exog]["is_cointegrated"]]
+    
+    if cointegrated_exogs and len(analysis_data) > 60:
+        try:
+            # Prepare data for VECM
+            vecm_data = analysis_data[["Death_rate_100k"] + cointegrated_exogs].dropna()
+            
+            # Fit VECM model
+            vecm_model = fit_vecm_model(vecm_data, deterministic='ci')
+            
+            if vecm_model is not None:
+                # Store results
+                results.append({
+                    "Region": region,
+                    "Lag": np.nan,  # VECM doesn't use the same lag concept
+                    "D_Order": 0,
+                    "Model_Type": "VECM",
+                    "Effect": np.nan,
+                    "p_value": np.nan,
+                    "AIC": vecm_model.aic,
+                    "RMSE": np.nan,
+                    "Residuals_white": np.nan,
+                    "Lag_Selection_Method": "Cointegration",
+                    "Vaccination_Start_Date": str(vacc_start_date) if pd.notna(vacc_start_date) else None,
+                    "Analysis_Period_Days": len(analysis_data)
+                })
+                
+                fitted_models[region]["VECM"] = vecm_model
+                
+                governance.log_decision("MODEL_FIT_SUCCESS", f"VECM model fitted for {region}", 
+                                       "VECM model converged and parameters were estimated.", 
+                                       {"aic": vecm_model.aic, "cointegrated_vars": cointegrated_exogs}, 
+                                       f"AIC: {vecm_model.aic:.2f}")
+                
+                model_execution_details.append({
+                    "Region": region,
+                    "Lag": np.nan,
+                    "Model_Type": "VECM",
+                    "Status": "Success",
+                    "Reason": "N/A"
+                })
+        except Exception as e:
+            error_text = f"Failed to fit VECM for {region}"
+            governance.log_event("MODELING", error_text, 
+                                {"region": region, "error": str(e)}, "ERROR")
+            governance.log_decision("MODEL_FIT_FAILED", error_text, 
+                                   f"An exception occurred during VECM fitting.", 
+                                   {"error": str(e)}, "Failed")
+            
+            model_execution_details.append({
+                "Region": region,
+                "Lag": np.nan,
+                "Model_Type": "VECM",
+                "Status": "Failed",
+                "Reason": str(e)
+            })
+
+if not results:
+    governance.log_event("MODELING", "Execution finished. No models were successfully fitted. Exiting.", severity="ERROR")
+    sys.exit()
+
+results_df = pd.DataFrame(results)
+results_path = CSV_OUTPUT_DIR / "model_results.csv"
+results_df.to_csv(results_path, index=False)
+governance.log_event("MODELING", "Model results saved", {"path": str(results_path), "successful_models": len(results_df)})
+
+# Save causality results
+causality_df = pd.DataFrame(causality_results)
+causality_path = CSV_OUTPUT_DIR / "causality_results.csv"
+causality_df.to_csv(causality_path, index=False)
+governance.log_event("MODELING", "Causality results saved", {"path": str(causality_path)})
+
+# Save cross-correlation results
+cross_corr_df = pd.DataFrame(cross_corr_results)
+cross_corr_path = CSV_OUTPUT_DIR / "cross_correlation_results.csv"
+cross_corr_df.to_csv(cross_corr_path, index=False)
+governance.log_event("MODELING", "Cross-correlation results saved", {"path": str(cross_corr_path)})
+
+# Save model execution details
+execution_df = pd.DataFrame(model_execution_details)
+execution_path = CSV_OUTPUT_DIR / "model_execution_details.csv"
+execution_df.to_csv(execution_path, index=False)
+governance.log_event("MODELING", "Model execution details saved", {"path": str(execution_path)})
+
+# Save results in JSON format
+json_results = {
+    "model_results": results_df.to_dict(orient='records'),
+    "causality_results": causality_df.to_dict(orient='records'),
+    "cross_correlation_results": cross_corr_df.to_dict(orient='records'),
+    "model_execution_details": execution_df.to_dict(orient='records')
+}
+json_path = JSON_OUTPUT_DIR / "analysis_results.json"
+with open(json_path, 'w', encoding='utf-8') as f:
+    json.dump(convert_to_serializable(json_results), f, indent=2, ensure_ascii=False)
+governance.log_event("MODELING", "Results saved in JSON format", {"path": str(json_path)})
+
+# ============================================================
+# PLOTTING FUNCTIONS
+# ============================================================
+
+def generate_forecast_plots(fitted_models, df, output_dir):
+    print("\nGenerating model fit plots...")
+    plot_info_list = []
+    for region, models_data in fitted_models.items():
+        if not models_data: continue
+        region_data = df[df["WHO_region"] == region].copy()
+        vacc_start_date = region_data['vaccination_start_date'].min()
+        
+        # Use data from vaccination start date
+        if pd.notna(vacc_start_date):
+            region_data = region_data[region_data['date'] >= vacc_start_date]
+        
+        region_data.set_index("date", inplace=True)
+        y = region_data["Death_rate_100k"]
+        
+        for model_key, model in models_data.items():
+            try:
+                if model_key.startswith("SARIMAX_"):
+                    # Extract lag from model key
+                    lag = model_key.split("_")[1]
+                    
+                    fitted_values = model.fittedvalues
+                    residuals = model.resid
+                    fig = plt.figure(figsize=(16, 10))
+                    gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+                    
+                    ax1 = fig.add_subplot(gs[0, :])
+                    ax1.plot(y.index, y, label='Historical Data', color='royalblue', linewidth=2)
+                    ax1.plot(fitted_values.index, fitted_values, label='Model Fit (Fitted Values)', color='tomato', linestyle='--', linewidth=2)
+                    ax1.set_title(f'SARIMAX Model Fit for {region} (Lag: {lag} days)', fontsize=16, fontweight='bold')
+                    ax1.set_xlabel('Date'); ax1.set_ylabel('Death Rate per 100k'); ax1.legend(); ax1.grid(True, linestyle='--', alpha=0.6)
+                    
+                    # Add vaccination start date line
+                    if pd.notna(vacc_start_date):
+                        ax1.axvline(x=vacc_start_date, color='green', linestyle=':', linewidth=2, label='Vaccination Start')
+                    
+                    stats_text = f'AIC: {model.aic:.2f}\nRMSE: {np.sqrt(np.mean(resid**2)):.4f}'
+                    ax1.text(0.05, 0.95, stats_text, transform=ax1.transAxes, fontsize=10, verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+                    
+                    ax2 = fig.add_subplot(gs[1, 0]); ax2.plot(residuals.index, residuals, color='gray'); ax2.axhline(0, color='black', linestyle='--')
+                    ax2.set_title('Residuals Over Time'); ax2.set_xlabel('Date'); ax2.set_ylabel('Residuals'); ax2.grid(True, linestyle='--', alpha=0.6)
+                    
+                    ax3 = fig.add_subplot(gs[1, 1]); ax3.hist(residuals, bins=20, color='skyblue', edgecolor='black')
+                    ax3.set_title('Distribution of Residuals'); ax3.set_xlabel('Residual Value'); ax3.set_ylabel('Frequency'); ax3.grid(True, linestyle='--', alpha=0.6)
+                    
+                    plot_path = output_dir / f"sarimax_model_fit_{region}_lag{lag}.png"
+                    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+                    
+                    caption = (f"Detailed SARIMAX model diagnostics for {region} using a {lag}-day lag. The analysis focuses on the period from vaccination start date. "
+                               f"The main plot compares the actual death rate with the model's fitted values, showing how well the model captures the observed trend. "
+                               f"The green dotted line indicates the vaccination start date. The lower-left plot displays the residuals over time, "
+                               f"and the lower-right plot shows the distribution of residuals.")
+                    plot_info_list.append({"path": plot_path, "caption": caption})
+                
+                elif model_key == "VAR":
+                    # Plot VAR impulse response functions
+                    irf = model.irf(10)
+                    fig = irf.plot(orth=False, impulse='fully_vaccinated_100k', response='Death_rate_100k')
+                    fig.suptitle(f'VAR Impulse Response for {region}', fontsize=16, fontweight='bold')
+                    fig.set_size_inches(12, 8)
+                    
+                    plot_path = output_dir / f"var_impulse_response_{region}.png"
+                    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+                    
+                    caption = (f"VAR impulse response function for {region}, showing the effect of a shock to the vaccination rate on the death rate over time. "
+                               f"This visualization helps understand the dynamic relationship between vaccination and mortality in the VAR framework.")
+                    plot_info_list.append({"path": plot_path, "caption": caption})
+                
+                elif model_key == "VECM":
+                    # Plot VECM cointegration relations
+                    fig = plt.figure(figsize=(12, 8))
+                    plt.plot(model.cointegrating_vectors[0])
+                    plt.title(f'VECM Cointegration Relations for {region}', fontsize=16, fontweight='bold')
+                    plt.xlabel('Time'); plt.ylabel('Cointegration Relation')
+                    plt.grid(True, linestyle='--', alpha=0.6)
+                    
+                    plot_path = output_dir / f"vecm_cointegration_{region}.png"
+                    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+                    
+                    caption = (f"VECM cointegration relations for {region}, showing the long-term equilibrium relationship between death rate and vaccination variables. "
+                               f"The cointegration relation should be stationary if the model is correctly specified.")
+                    plot_info_list.append({"path": plot_path, "caption": caption})
+            except Exception as e:
+                print(f"Could not generate model fit plot for {region}, model {model_key}: {e}")
+    return plot_info_list
+
+def generate_causality_plots(causality_df, output_path):
+    fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Filter for significant causal relationships
+    significant_causality = causality_df[causality_df['Is_Causal'] == True]
+    
+    # Create a pivot table for heatmap
+    pivot = significant_causality.pivot_table(
+        index='Region', 
+        columns='Cause', 
+        values='Min_P_Value', 
+        aggfunc='min'
+    )
+    
+    # Create heatmap
+    sns.heatmap(pivot, annot=True, fmt=".3f", cmap='RdYlGn_r', ax=ax, cbar_kws={'label': 'Min P-Value'})
+    ax.set_title('Granger Causality Results (Significant Relationships Only)', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"Causality plot saved to {output_path}")
+
+def generate_cross_correlation_plots(cross_corr_df, output_path):
+    fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Plot for each vaccination variable
+    for var in cross_corr_df['Variable'].unique():
+        var_data = cross_corr_df[cross_corr_df['Variable'] == var]
+        sns.lineplot(data=var_data, x='Region', y='Optimal_Lag', marker='o', label=f'{var} Optimal Lag', ax=ax)
+    
+    ax.set_title('Optimal Lag from Cross-Correlation Analysis by Region', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Optimal Lag (days)')
+    ax.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"Cross-correlation plot saved to {output_path}")
+
+def generate_model_comparison_plot(results_df, output_path):
+    fig, axes = plt.subplots(2, 2, figsize=(20, 15))
+    
+    # Model Type Distribution
+    model_counts = results_df['Model_Type'].value_counts()
+    axes[0, 0].pie(model_counts.values, labels=model_counts.index, autopct='%1.1f%%', startangle=90)
+    axes[0, 0].set_title('Distribution of Model Types', fontsize=14, fontweight='bold')
+    
+    # AIC by Model Type
+    sns.boxplot(data=results_df, x='Model_Type', y='AIC', ax=axes[0, 1])
+    axes[0, 1].set_title('AIC by Model Type', fontsize=14, fontweight='bold')
+    
+    # Effect Size by Model Type
+    sarimax_data = results_df[results_df['Model_Type'] == 'SARIMAX'].dropna(subset=['Effect'])
+    if not sarimax_data.empty:
+        sns.boxplot(data=sarimax_data, x='Region', y='Effect', ax=axes[1, 0])
+        axes[1, 0].set_title('Vaccine Effect Size by Region (SARIMAX)', fontsize=14, fontweight='bold')
+        axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # Success Rate by Model Type
+    success_rate = execution_df.groupby('Model_Type')['Status'].apply(lambda x: (x == 'Success').mean())
+    success_rate.plot(kind='bar', ax=axes[1, 1])
+    axes[1, 1].set_title('Model Success Rate by Type', fontsize=14, fontweight='bold')
+    axes[1, 1].set_ylabel('Success Rate')
+    axes[1, 1].tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"Model comparison plot saved to {output_path}")
+
+def generate_lag_selection_plot(results_df, output_path):
+    fig, ax = plt.subplots(figsize=(12, 7))
+    
+    # Filter for SARIMAX models only
+    sarimax_data = results_df[results_df['Model_Type'] == 'SARIMAX'].dropna(subset=['Lag'])
+    
+    if not sarimax_data.empty:
+        sns.boxplot(data=sarimax_data, x='Lag_Selection_Method', y='AIC', ax=ax)
+        ax.set_title('Model Performance by Lag Selection Method', fontsize=16, fontweight='bold')
+        ax.set_ylabel('AIC')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300)
+        plt.close()
+        print(f"Lag selection plot saved to {output_path}")
+    else:
+        print("No SARIMAX models with lag data available for lag selection plot.")
+
+def generate_model_execution_plot(execution_details_df, output_path):
+    fig, ax = plt.subplots(figsize=(12, 7))
+    execution_counts = execution_details_df.groupby(['Region', 'Model_Type', 'Status']).size().unstack(fill_value=0)
+    execution_counts.plot(kind='bar', stacked=True, ax=ax, color=['#d62728', '#2ca02c'])
+    ax.set_title('Model Execution Status by Region and Type', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Number of Models')
+    ax.set_xlabel('Region / Model Type')
+    ax.legend(title='Status')
+    ax.grid(True, linestyle='--', alpha=0.6)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"Model execution plot saved to {output_path}")
+
+def generate_vaccination_timeline_plot(df, output_path):
+    """Generate a plot showing vaccination timeline across regions."""
+    fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Get vaccination start dates by region
+    vacc_start_dates = df.groupby('WHO_region')['vaccination_start_date'].min().sort_values()
+    
+    # Create a timeline
+    for i, (region, start_date) in enumerate(vacc_start_dates.items()):
+        if pd.notna(start_date):
+            ax.barh(i, 1, left=start_date, height=0.8, alpha=0.7)
+            ax.text(start_date, i, f'  {region} ({start_date.strftime("%Y-%m-%d")})', 
+                   va='center', fontsize=10)
+    
+    ax.set_yticks([])
+    ax.set_xlabel('Date')
+    ax.set_title('Vaccination Start Timeline by WHO Region', fontsize=16, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    print(f"Vaccination timeline plot saved to {output_path}")
+
+def generate_text_reports(results_df, execution_details_df, causality_df, analytical_report_dir, governance_report_dir):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    comp_report_path = analytical_report_dir / "comprehensive_report.txt"
+    
+    # Calculate summary statistics
+    total_models = len(execution_details_df)
+    successful_models = len(execution_details_df[execution_details_df['Status'] == 'Success'])
+    model_types = results_df['Model_Type'].value_counts().to_dict()
+    causality_count = len(causality_df[causality_df['Is_Causal'] == True])
+    
+    # Calculate average analysis period
+    avg_analysis_period = results_df['Analysis_Period_Days'].mean()
+    
+    with open(comp_report_path, "w", encoding="utf-8") as f:
+        f.write("===========================================================\n")
+        f.write("    Enhanced COVID-19 Modeling Analysis Report (Layer 4)\n")
+        f.write("===========================================================\n\n")
+        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("--- VACCINATION TIMELINE ANALYSIS ---\n")
+        f.write(f"This analysis correctly handles the vaccination timeline, recognizing that vaccination data\n")
+        f.write(f"is only available from the date vaccines were first administered in each region.\n")
+        f.write(f"Average analysis period per region: {avg_analysis_period:.1f} days\n\n")
+        
+        f.write("--- EXECUTION SUMMARY ---\n")
+        f.write(f"Total Models Attempted: {total_models}\n")
+        f.write(f"Successful Models: {successful_models}\n")
+        f.write(f"Success Rate: {successful_models/total_models*100:.1f}%\n\n")
+        
+        f.write("--- MODEL TYPE BREAKDOWN ---\n")
+        for model_type, count in model_types.items():
+            f.write(f"{model_type}: {count} models\n")
+        f.write("\n")
+        
+        f.write("--- CAUSALITY ANALYSIS ---\n")
+        f.write(f"Significant causal relationships found: {causality_count}\n")
+        f.write(f"Total causality tests performed: {len(causality_df)}\n\n")
+        
+        f.write("--- MODEL PERFORMANCE METRICS ---\n")
+        sarimax_data = results_df[results_df['Model_Type'] == 'SARIMAX'].dropna(subset=['AIC', 'RMSE', 'Effect'])
+        if not sarimax_data.empty:
+            f.write(f"Average AIC (SARIMAX): {sarimax_data['AIC'].mean():.2f} (±{sarimax_data['AIC'].std():.2f})\n")
+            f.write(f"Average RMSE (SARIMAX): {sarimax_data['RMSE'].mean():.4f} (±{sarimax_data['RMSE'].std():.4f})\n")
+            f.write(f"Average Effect Size (SARIMAX): {sarimax_data['Effect'].mean():.4f} (±{sarimax_data['Effect'].std():.4f})\n")
+            f.write(f"Significant Models (p<0.05): {len(sarimax_data[sarimax_data['p_value'] < 0.05])} ({len(sarimax_data[sarimax_data['p_value'] < 0.05])/len(sarimax_data)*100:.1f}%)\n\n")
+        
+        var_data = results_df[results_df['Model_Type'] == 'VAR']
+        if not var_data.empty:
+            f.write(f"Average AIC (VAR): {var_data['AIC'].mean():.2f} (±{var_data['AIC'].std():.2f})\n\n")
+        
+        vecm_data = results_df[results_df['Model_Type'] == 'VECM']
+        if not vecm_data.empty:
+            f.write(f"Average AIC (VECM): {vecm_data['AIC'].mean():.2f} (±{vecm_data['AIC'].std():.2f})\n\n")
+        
+        f.write("--- DETAILED RESULTS ---\n")
+        f.write(results_df.to_string())
+    
+    print(f"Comprehensive report saved to {comp_report_path}")
+    
+    mon_report_path = governance_report_dir / f"monitoring_report_{timestamp}.txt"
+    with open(mon_report_path, "w", encoding="utf-8") as f:
+        f.write(f"Monitoring Log for Layer 4 Execution\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("="*40 + "\n\n")
+        f.write(execution_details_df.to_string())
+    
+    print(f"Monitoring report saved to {mon_report_path}")
+    return comp_report_path, mon_report_path
+
+def create_comprehensive_pdf_report(all_plot_info, text_report_path, output_pdf_path, log_file=None):
+    print(f"\nGenerating comprehensive PDF report at {output_pdf_path}...")
+    with PdfPages(output_pdf_path) as pdf:
+        # Page 1: Title Page
+        fig = plt.figure(figsize=(8, 11))
+        fig.text(0.5, 0.9, "Enhanced COVID-19 Analysis Report", ha='center', fontsize=24, fontweight='bold')
+        fig.text(0.5, 0.85, "Impact of Vaccination on Death Rates (Layer 4)", ha='center', fontsize=18)
+        fig.text(0.5, 0.8, "With Correct Vaccination Timeline Handling", ha='center', fontsize=14)
+        fig.text(0.5, 0.75, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ha='center', fontsize=12)
+        fig.text(0.5, 0.1, "Governance & Execution Layer", ha='center', fontsize=14, style='italic', color='gray')
+        pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+        plt.close(fig)
+
+        # Page 2: Methodology and Summary
+        with open(text_report_path, 'r', encoding='utf-8') as f: text_content = f.read()
+        fig = plt.figure(figsize=(8, 11))
+        fig.text(0.05, 0.95, text_content, fontsize=10, va='top', family='monospace')
+        pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+        plt.close(fig)
+        
+        # Page 3: Summary Table
+        fig, ax = plt.subplots(figsize=(8, 11))
+        ax.axis('tight'); ax.axis('off')
+        the_table = ax.table(cellText=results_df.round(4).values, colLabels=results_df.columns, cellLoc='center', loc='center')
+        the_table.auto_set_font_size(False); the_table.set_fontsize(9); the_table.scale(1.2, 1.2)
+        plt.title("Model Results Summary", fontsize=16, fontweight='bold', pad=20)
+        pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+        plt.close(fig)
+
+        # Add all generated plots with captions
+        for info in sorted(all_plot_info, key=lambda x: x['path'].name):
+            plot_path = info['path']; caption = info['caption']
+            if plot_path.exists():
+                try:
+                    fig, ax = plt.subplots(figsize=(8, 11))
+                    img = plt.imread(plot_path); ax.imshow(img); ax.axis('off')
+                    # Add caption text below the plot
+                    fig.text(0.5, 0.02, caption, ha='center', va='bottom', fontsize=10, wrap=True)
+                    pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+                    plt.close(fig)
+                except Exception as e: print(f"Could not add plot {plot_path} to PDF. Error: {e}")
+        
+        # Final Page: Conclusion
+        fig = plt.figure(figsize=(8, 11))
+        fig.text(0.1, 0.9, "Analysis Conclusion:", fontsize=16, fontweight='bold')
+        conclusion_text = (
+            "This enhanced report details the results of a comprehensive time-series analysis using SARIMAX, VAR, and VECM models "
+            f"to estimate the effect of vaccination on COVID-19 death rates across different WHO regions. "
+            f"The analysis correctly handles the vaccination timeline, focusing on the period from when vaccines became available. "
+            f"The analysis successfully fitted {len(results_df)} models, revealing varying levels of vaccine effectiveness and statistical significance. "
+            "Granger causality tests and cross-correlation analysis provided additional insights into the temporal relationships. "
+            "Refer to the individual plots and their captions for detailed regional insights and model diagnostics. "
+            "The stability of models was also evaluated to ensure the reliability of the findings."
+        )
+        fig.text(0.1, 0.7, conclusion_text, fontsize=12, wrap=True)
+        pdf.savefig(fig, bbox_inches='tight', pad_inches=0.8)
+        plt.close(fig)
+    print(f"PDF report generated successfully.")
+
+
+# ============================================================
+# EXECUTE REPORTING FUNCTIONS (THE "ONE PLACE" FOR ORCHESTRATION)
+# ============================================================
+sens_df = pd.DataFrame(sensitivity)
+
+print("\n" + "="*50)
+print("GENERATING ENHANCED PLOTS AND REPORTS")
+print("="*50)
+
+# 1. Generate plots and collect their info
+forecast_plot_info = generate_forecast_plots(fitted_models, df, PLOT_OUTPUT_DIR)
+
+# Model comparison plot
+model_comp_path = PLOT_OUTPUT_DIR / "model_comparison.png"
+generate_model_comparison_plot(results_df, model_comp_path)
+model_comp_caption = "A comprehensive comparison of different model types used in the analysis. The top-left shows the distribution of model types, top-right compares AIC values across model types, bottom-left shows vaccine effect sizes by region for SARIMAX models, and bottom-right shows the success rate of each model type."
+
+# Causality plot
+causality_plot_path = PLOT_OUTPUT_DIR / "causality_analysis.png"
+generate_causality_plots(causality_df, causality_plot_path)
+causality_caption = "A heatmap showing significant Granger causality relationships between vaccination variables and death rates across regions. Lower p-values (darker colors) indicate stronger evidence of causality."
+
+# Cross-correlation plot
+cross_corr_plot_path = PLOT_OUTPUT_DIR / "cross_correlation_analysis.png"
+generate_cross_correlation_plots(cross_corr_df, cross_corr_plot_path)
+cross_corr_caption = "A line plot showing the optimal lag days identified through cross-correlation analysis for each vaccination variable and region. This helps identify the most appropriate time lag between vaccination and its effect on death rates."
+
+# Lag selection plot
+lag_sel_path = PLOT_OUTPUT_DIR / "lag_selection_analysis.png"
+generate_lag_selection_plot(results_df, lag_sel_path)
+lag_sel_caption = "A comparison of model performance (AIC) between different lag selection methods. This helps evaluate whether the data-driven AIC-based lag selection provides better model fit compared to fixed lags."
+
+# Model execution status plot
+exec_status_path = PLOT_OUTPUT_DIR / "model_execution.png"
+generate_model_execution_plot(execution_df, exec_status_path)
+exec_caption = "A summary of the model fitting process. This stacked bar chart shows the number of successful (green) versus failed (red) model fits for each WHO region and model type, providing insight into data availability and model convergence issues."
+
+# Vaccination timeline plot
+vacc_timeline_path = PLOT_OUTPUT_DIR / "vaccination_timeline.png"
+generate_vaccination_timeline_plot(df, vacc_timeline_path)
+vacc_timeline_caption = "A timeline visualization showing when vaccination started in each WHO region. This helps understand the different timeframes available for vaccination impact analysis across regions."
+
+# 2. Consolidate all plot information into a single list
+all_plot_info = [
+    {"path": model_comp_path, "caption": model_comp_caption},
+    {"path": causality_plot_path, "caption": causality_caption},
+    {"path": cross_corr_plot_path, "caption": cross_corr_caption},
+    {"path": lag_sel_path, "caption": lag_sel_caption},
+    {"path": exec_status_path, "caption": exec_caption},
+    {"path": vacc_timeline_path, "caption": vacc_timeline_caption},
+]
+# Add the dynamically generated forecast plots
+all_plot_info.extend(forecast_plot_info)
+
+# 3. Generate text reports
+comp_report_path, mon_report_path = generate_text_reports(
+    results_df, execution_df, causality_df, 
+    ANALYTICAL_REPORTS_DIR, GOVERNANCE_REPORTS_DIR
+)
+
+# 4. Generate the final comprehensive PDF report with all info
+final_pdf_path = PDF_OUTPUT_DIR / "Comprehensive_Analysis_Report.pdf"
+create_comprehensive_pdf_report(all_plot_info, comp_report_path, final_pdf_path)
+
+# 5. Generate governance summary and reports
+summary_path, summary_data = governance.generate_governance_summary(validation_results)
+audit_path = governance.generate_audit_report()
+governance_pdf_path = PDF_OUTPUT_DIR / "Governance_Report.pdf"
+governance.generate_governance_pdf_report(summary_path, audit_path, governance_pdf_path)
+
+print("\n" + "="*50)
+print("Enhanced Reporting Complete.")
+print(f"All analytical outputs are in: {ROOT_OUTPUT_DIR}")
+print(f"Governance files (logs, audit, monitoring) are in: {GOVERNANCE_DIR}")
+print(f"Final PDF report: {final_pdf_path}")
+print(f"Governance PDF report: {governance_pdf_path}")
+print("="*50)
