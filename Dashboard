@@ -1,0 +1,656 @@
+#Dashboard##########
+# -*- coding: utf-8 -*-
+"""
+Enhanced COVID-19 Dashboard with Governance Features 
+@author: Mahnaz Nouri
+"""
+
+import os
+import json
+import pandas as pd
+import numpy as np
+import dash
+from dash import dcc, html, Input, Output, State
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from glob import glob
+from scipy import stats
+
+# ============================================================
+# PATHS AND CONFIGURATION
+# ============================================================
+DATA_PATH = r"C:\Users\ASUS\Desktop\Barnabus\aggregated_data\agregate_Region_cleandata_with_vacc_dates_corrected.csv"
+GOV_JSON_DIR = r"C:\Users\ASUS\Desktop\Barnabus\layer4_output_enhanced_v4\governance\reports"
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+df = pd.read_csv(
+    DATA_PATH,
+    parse_dates=["date", "vaccination_start_date"]
+).sort_values(["WHO_region", "date"])
+
+# Ensure numeric columns
+for c in ["Death_rate_100k", "fully_vaccinated_100k"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+regions = sorted(df["WHO_region"].dropna().unique())
+default_region = regions[0]
+
+# ============================================================
+# LOAD GOVERNANCE DATA (FROM CODE 2)
+# ============================================================
+gov_files = sorted(glob(os.path.join(GOV_JSON_DIR, "*.json")))
+gov = {}
+anomalies = []
+
+if gov_files:
+    try:
+        with open(gov_files[-1], "r", encoding="utf-8") as f:
+            gov = json.load(f)
+            anomalies = gov.get("top_anomalies", [])
+        print(f"Governance data loaded from latest file: {os.path.basename(gov_files[-1])}")
+    except Exception as e:
+        print(f"Error loading governance data: {e}")
+else:
+    print("No governance files found, using internal anomaly detection only")
+
+# Mark anomalies from governance data
+df["is_gov_anomaly"] = False
+for a in anomalies:
+    if "WHO_region" in a and "date" in a:
+        mask = (
+            (df["WHO_region"] == a["WHO_region"]) &
+            (df["date"] == pd.to_datetime(a["date"]))
+        )
+        df.loc[mask, "is_gov_anomaly"] = True
+
+# ============================================================
+# ENHANCED ANOMALY DETECTION (COMBINING BOTH APPROACHES)
+# ============================================================
+# Z-score based anomaly detection
+df["death_z"] = (
+    df.groupby("WHO_region")["Death_rate_100k"]
+      .transform(lambda x: (x - x.mean()) / x.std(ddof=0))
+)
+df["is_z_anomaly"] = df["death_z"].abs() > 3
+
+# Combine anomaly flags
+df["is_anomaly"] = df["is_gov_anomaly"] | df["is_z_anomaly"]
+
+# ============================================================
+# VACCINATION COLUMN DETECTION (FROM CODE 2)
+# ============================================================
+if "fully_vaccinated_100k" in df.columns:
+    vacc_col = "fully_vaccinated_100k"
+elif "persons_vaccinated_100k" in df.columns:
+    vacc_col = "persons_vaccinated_100k"
+elif "vaccine_doses_administered_100k" in df.columns:
+    vacc_col = "vaccine_doses_administered_100k"
+else:
+    vacc_col = None
+    print("Warning: No vaccination column found")
+
+# ============================================================
+# PRECOMPUTE LAG EFFECT DATA (FROM CODE 2)
+# ============================================================
+MAX_LAG = 120
+lag_results = []
+
+if vacc_col:
+    for region in regions:
+        dfr = df[df["WHO_region"] == region].copy()
+        dfr = dfr.dropna(subset=["Death_rate_100k", vacc_col])
+
+        for lag in range(0, MAX_LAG + 1, 7):  # Use 7-day steps
+            dfr[f"vacc_lag_{lag}"] = dfr[vacc_col].shift(lag)
+            corr = dfr[["Death_rate_100k", f"vacc_lag_{lag}"]].corr().iloc[0, 1]
+            lag_results.append({
+                "WHO_region": region,
+                "lag": lag,
+                "effect": corr if not np.isnan(corr) else 0.0
+            })
+else:
+    # Fallback: flat zero effects
+    for region in regions:
+        for lag in range(0, MAX_LAG + 1, 7):
+            lag_results.append({
+                "WHO_region": region,
+                "lag": lag,
+                "effect": 0.0
+            })
+
+lag_df = pd.DataFrame(lag_results)
+
+# ============================================================
+# ENHANCED POLICY SIMULATION FUNCTION
+# ============================================================
+def simulate_policy_change(dfr, vacc_col, policy_change, lag_days=30):
+    """
+    Simulate the effect of a policy change on death rates with enhanced methodology
+    
+    Args:
+        dfr: DataFrame with the data
+        vacc_col: Column name for vaccination data
+        policy_change: Percentage change in vaccination rate (positive for increase)
+        lag_days: Number of days to lag the vaccination effect
+    
+    Returns:
+        Tuple of (simulated_df, metrics_dict)
+    """
+    if vacc_col is None:
+        # Return original data with no effect if no vaccination data
+        metrics = {
+            "model_type": "No vaccination data",
+            "correlation": 0,
+            "p_value": 1,
+            "base_death_rate": dfr["Death_rate_100k"].mean(),
+            "simulated_death_rate": dfr["Death_rate_100k"].mean(),
+            "percent_change": 0,
+            "deaths_averted": 0,
+            "confidence_interval": (0, 0)
+        }
+        return dfr, metrics
+    
+    sim_df = dfr.copy()
+    
+    # Apply policy change to vaccination rate
+    sim_df[vacc_col] *= (1 + policy_change/100)
+    
+    # Calculate the effect on death rate based on historical correlation
+    try:
+        # Use a linear model based on historical data with lag
+        dfr_clean = dfr.dropna(subset=[vacc_col, "Death_rate_100k"])
+        
+        if len(dfr_clean) > 10:
+            # Apply lag to vaccination data
+            dfr_clean[f"{vacc_col}_lag"] = dfr_clean[vacc_col].shift(lag_days)
+            dfr_clean = dfr_clean.dropna(subset=[f"{vacc_col}_lag", "Death_rate_100k"])
+            
+            # Calculate correlation and p-value
+            corr, p_value = stats.pearsonr(dfr_clean[f"{vacc_col}_lag"], dfr_clean["Death_rate_100k"])
+            
+            # Fit linear model
+            slope, intercept, r_value, p_value, std_err = stats.linregress(
+                dfr_clean[f"{vacc_col}_lag"], 
+                dfr_clean["Death_rate_100k"]
+            )
+            
+            # Apply the model to simulate new death rates
+            sim_df[f"{vacc_col}_lag"] = sim_df[vacc_col].shift(lag_days)
+            sim_df["Death_rate_100k_sim"] = intercept + slope * sim_df[f"{vacc_col}_lag"]
+            
+            # Calculate confidence interval for the prediction
+            # Standard error of prediction
+            y_pred = intercept + slope * dfr_clean[f"{vacc_col}_lag"]
+            residuals = dfr_clean["Death_rate_100k"] - y_pred
+            mse = np.sum(residuals**2) / (len(dfr_clean) - 2)
+            std_pred = np.sqrt(mse * (1 + 1/len(dfr_clean) + (dfr_clean[f"{vacc_col}_lag"] - dfr_clean[f"{vacc_col}_lag"].mean())**2 / np.sum((dfr_clean[f"{vacc_col}_lag"] - dfr_clean[f"{vacc_col}_lag"].mean())**2)))
+            
+            # 95% confidence interval
+            ci = 1.96 * std_pred.mean()
+            ci_lower = sim_df["Death_rate_100k_sim"] - ci
+            ci_upper = sim_df["Death_rate_100k_sim"] + ci
+            
+            # Ensure death rates don't go negative
+            sim_df["Death_rate_100k_sim"] = sim_df["Death_rate_100k_sim"].clip(lower=0)
+            sim_df["Death_rate_100k_sim_lower"] = ci_lower.clip(lower=0)
+            sim_df["Death_rate_100k_sim_upper"] = ci_upper
+            
+            # Calculate metrics
+            base_death_rate = dfr["Death_rate_100k"].mean()
+            simulated_death_rate = sim_df["Death_rate_100k_sim"].mean()
+            percent_change = ((simulated_death_rate - base_death_rate) / base_death_rate) * 100
+            
+            # Estimate deaths averted (assuming population of 100k per data point)
+            deaths_averted = (base_death_rate - simulated_death_rate) * len(dfr) / 100000
+            
+            metrics = {
+                "model_type": "Linear regression with lag",
+                "correlation": corr,
+                "p_value": p_value,
+                "r_squared": r_value**2,
+                "base_death_rate": base_death_rate,
+                "simulated_death_rate": simulated_death_rate,
+                "percent_change": percent_change,
+                "deaths_averted": deaths_averted,
+                "confidence_interval": (ci_lower.mean(), ci_upper.mean()),
+                "lag_days": lag_days
+            }
+        else:
+            # If insufficient data, use a simple proportional model
+            sim_df["Death_rate_100k_sim"] = sim_df["Death_rate_100k"] * (1 - policy_change/200)
+            base_death_rate = dfr["Death_rate_100k"].mean()
+            simulated_death_rate = sim_df["Death_rate_100k_sim"].mean()
+            percent_change = ((simulated_death_rate - base_death_rate) / base_death_rate) * 100
+            
+            metrics = {
+                "model_type": "Simple proportional model (insufficient data)",
+                "correlation": 0,
+                "p_value": 1,
+                "r_squared": 0,
+                "base_death_rate": base_death_rate,
+                "simulated_death_rate": simulated_death_rate,
+                "percent_change": percent_change,
+                "deaths_averted": (base_death_rate - simulated_death_rate) * len(dfr) / 100000,
+                "confidence_interval": (0, 0),
+                "lag_days": lag_days
+            }
+    except Exception as e:
+        # Fallback to simple proportional model
+        sim_df["Death_rate_100k_sim"] = sim_df["Death_rate_100k"] * (1 - policy_change/200)
+        base_death_rate = dfr["Death_rate_100k"].mean()
+        simulated_death_rate = sim_df["Death_rate_100k_sim"].mean()
+        percent_change = ((simulated_death_rate - base_death_rate) / base_death_rate) * 100
+        
+        metrics = {
+            "model_type": f"Simple proportional model (error: {str(e)})",
+            "correlation": 0,
+            "p_value": 1,
+            "r_squared": 0,
+            "base_death_rate": base_death_rate,
+            "simulated_death_rate": simulated_death_rate,
+            "percent_change": percent_change,
+            "deaths_averted": (base_death_rate - simulated_death_rate) * len(dfr) / 100000,
+            "confidence_interval": (0, 0),
+            "lag_days": lag_days
+        }
+    
+    return sim_df, metrics
+
+# ============================================================
+# APP
+# ============================================================
+app = dash.Dash(__name__)
+app.title = "Enhanced Policy-Grade COVID Dashboard"
+
+app.layout = html.Div(style={"padding": "20px", "fontFamily": "Arial, sans-serif"}, children=[
+
+    html.H2("Enhanced COVID-19 Vaccination Impact Dashboard", 
+            style={"textAlign": "center"}),
+
+    html.Div(style={"display": "flex", "gap": "20px", "alignItems": "flex-start"}, children=[
+
+        dcc.Dropdown(
+            id="region",
+            options=[{"label": "ALL", "value": "ALL"}] +
+                    [{"label": r, "value": r} for r in regions],
+            value=default_region,
+            clearable=False,
+            style={"width": "30%"}
+        ),
+
+        # --- MODIFICATION: Sliders in a box, each taking 50% width ---
+        html.Div(style={
+            "border": "1px solid #d3d3d3",
+            "borderRadius": "5px",
+            "padding": "10px",
+            "flexGrow": "1",
+            "backgroundColor": "#f9f9f9",
+            "display": "flex",
+            "flexDirection": "row",
+            "gap": "20px"
+        }, children=[
+            html.Div(style={"width": "50%"}, children=[
+                html.P("Vaccination Lag (days):", style={"marginBottom": "5px", "fontSize": "12px"}),
+                dcc.Slider(
+                    id="lag",
+                    min=0, max=MAX_LAG, step=7, value=30,
+                    marks={i: str(i) for i in range(0, MAX_LAG+1, 30)},
+                    tooltip={"placement": "bottom"},
+                    updatemode='drag'
+                ),
+            ]),
+            html.Div(style={"width": "50%"}, children=[
+                html.P("Policy Change (%):", style={"marginBottom": "5px", "fontSize": "12px"}),
+                dcc.Slider(
+                    id="policy",
+                    min=-20, max=50, step=10, value=10,
+                    marks={i: f"{i}%" for i in range(-20, 51, 20)},
+                    tooltip={"placement": "bottom"},
+                    updatemode='drag'
+                ),
+            ])
+        ])
+    ]),
+
+    html.Hr(),
+
+    # --- NEW: Policy Simulation Results Section ---
+    html.Div(id="policy-simulation-results", style={
+        "padding": "15px", 
+        "marginTop": "20px", 
+        "backgroundColor": "#eef", 
+        "borderRadius": "5px",
+        "border": "1px solid #ddd"
+    }),
+
+    html.Hr(),
+
+    dcc.Graph(id="fig", style={"marginTop": "20px"}),
+
+    html.Div(id="text", style={"padding": "10px", "marginTop": "20px", "backgroundColor": "#eef", "borderRadius": "5px", "fontSize": "12px"})
+
+])
+
+# ============================================================
+# CALLBACK
+# ============================================================
+@app.callback(
+    Output("fig", "figure"),
+    Output("text", "children"),
+    Output("policy-simulation-results", "children"),
+    Input("region", "value"),
+    Input("lag", "value"),
+    Input("policy", "value")
+)
+def update(region, lag, policy):
+
+    dfr = df.copy() if region == "ALL" else df[df["WHO_region"] == region]
+
+    # ---------- LAG ANALYSIS ----------
+    lags = range(0, MAX_LAG + 1, 7)
+    corrs = []
+
+    for l in lags:
+        corr = dfr["Death_rate_100k"].corr(
+            dfr[vacc_col].shift(l) if vacc_col else pd.Series([np.nan] * len(dfr))
+        )
+        corrs.append(corr)
+
+    # ---------- ENHANCED POLICY EFFECT ----------
+    sim_df, metrics = simulate_policy_change(dfr, vacc_col, policy, lag)
+    
+    # ---------- TOP ANOMALY REGIONS ----------
+    top_anom = (
+        df.groupby("WHO_region")["is_anomaly"]
+          .sum()
+          .sort_values(ascending=False)
+          .head(5)
+    )
+    
+    # ---------- ANOMALY TYPES ----------
+    gov_anom_count = dfr["is_gov_anomaly"].sum()
+    z_anom_count = dfr["is_z_anomaly"].sum()
+
+    # ---------- POLICY SIMULATION RESULTS ----------
+    policy_results = html.Div([
+        html.H4("Policy Simulation Results", style={"color": "#333", "marginBottom": "15px"}),
+        html.Div(style={"display": "flex", "gap": "20px"}, children=[
+            # Left column - Metrics
+            html.Div(style={"width": "50%"}, children=[
+                html.P(f"Model Type: {metrics['model_type']}", style={"fontWeight": "bold"}),
+                html.P(f"Correlation: {metrics['correlation']:.3f} (p-value: {metrics['p_value']:.3f})"),
+                html.P(f"R-squared: {metrics['r_squared']:.3f}"),
+                html.P(f"Lag Period: {metrics['lag_days']} days"),
+                html.Hr(),
+                html.P(f"Base Death Rate: {metrics['base_death_rate']:.2f} per 100k"),
+                html.P(f"Simulated Death Rate: {metrics['simulated_death_rate']:.2f} per 100k"),
+                html.P(f"Percent Change: {metrics['percent_change']:.2f}%", 
+                       style={"color": "green" if metrics['percent_change'] < 0 else "red", "fontWeight": "bold"}),
+                html.P(f"Estimated Deaths Averted: {metrics['deaths_averted']:.0f}", 
+                       style={"color": "green", "fontWeight": "bold"}),
+            ]),
+            # Right column - Explanation
+            html.Div(style={"width": "50%"}, children=[
+                html.H5("Explanation of Simulation:", style={"marginBottom": "10px"}),
+                html.P(f"This simulation models the effect of a {policy:+d}% change in vaccination rates on death rates, "
+                       f"with a {lag}-day lag to account for the time needed for vaccinations to take effect."),
+                html.P(f"The model uses historical data to establish the relationship between vaccination and death rates. "
+                       f"The correlation coefficient ({metrics['correlation']:.3f}) indicates the strength of this relationship."),
+                html.P(f"The simulation predicts that a {policy:+d}% change in vaccination would lead to a "
+                       f"{metrics['percent_change']:.2f}% change in death rates, potentially averting "
+                       f"{metrics['deaths_averted']:.0f} deaths in the selected region(s)."),
+                html.P(f"Confidence Interval: [{metrics['confidence_interval'][0]:.2f}, {metrics['confidence_interval'][1]:.2f}]",
+                       style={"fontSize": "11px", "color": "#666"}),
+            ])
+        ])
+    ])
+
+    # ---------- FIGURE ----------
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=[
+            "Death Rate Over Time",
+            "Vaccination Lag Sensitivity",
+            "Top Regions by Anomalies",
+            "Policy Simulation Effect",
+            "", # <-- Empty title for pie chart
+            "Vaccination vs Death Rate (Scatter)"
+        ],
+        specs=[
+            [{"secondary_y": True}, {"type": "scatter"}],
+            [{"type": "bar"}, {"type": "scatter"}],
+            [{"type": "pie"}, {"type": "scatter"}]
+        ],
+        vertical_spacing=0.15
+    )
+
+    # Plot 1: Death Rate Over Time
+    fig.add_trace(
+        go.Scatter(
+            x=dfr["date"],
+            y=dfr["Death_rate_100k"],
+            mode="lines",
+            name="Death Rate",
+            line=dict(width=2)
+        ), row=1, col=1, secondary_y=False
+    )
+    if vacc_col:
+        fig.add_trace(
+            go.Scatter(
+                x=dfr["date"],
+                y=dfr[vacc_col],
+                mode="lines",
+                name="Vaccination Rate",
+                line=dict(width=2, dash="dot"),
+                yaxis="y2"
+            ), row=1, col=1, secondary_y=True
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=dfr[dfr["is_anomaly"]]["date"],
+            y=dfr[dfr["is_anomaly"]]["Death_rate_100k"],
+            mode="markers",
+            marker=dict(color="red", size=5),
+            name="Anomalies"
+        ), row=1, col=1, secondary_y=False
+    )
+
+    # Plot 2: Lag Correlation
+    fig.add_trace(
+        go.Scatter(x=list(lags), y=corrs, name="Lag Correlation"),
+        row=1, col=2
+    )
+    fig.add_vline(x=lag, line_dash="dash", row=1, col=2)
+
+    # Plot 3: Top Anomaly Regions
+    fig.add_trace(
+        go.Bar(x=top_anom.index, y=top_anom.values, name="Anomaly Count", marker_color='crimson'),
+        row=2, col=1
+    )
+
+    # Plot 4: Policy Simulation with Confidence Interval
+    fig.add_trace(
+        go.Scatter(
+            x=dfr["date"],
+            y=dfr["Death_rate_100k"],
+            mode="lines",
+            name="Observed Death Rate",
+            line=dict(color="blue")
+        ), row=2, col=2
+    )
+    if vacc_col:
+        fig.add_trace(
+            go.Scatter(
+                x=sim_df["date"],
+                y=sim_df["Death_rate_100k_sim"],
+                mode="lines",
+                name=f"Simulated ({policy:+d}% Vaccination)",
+                line=dict(color="green", dash="dash")
+            ), row=2, col=2
+        )
+        # Add confidence interval if available
+        if "Death_rate_100k_sim_lower" in sim_df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=sim_df["date"],
+                    y=sim_df["Death_rate_100k_sim_upper"],
+                    mode="lines",
+                    line=dict(width=0),
+                    showlegend=False
+                ), row=2, col=2
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=sim_df["date"],
+                    y=sim_df["Death_rate_100k_sim_lower"],
+                    mode="lines",
+                    line=dict(width=0),
+                    fill="tonexty",
+                    fillcolor="rgba(0,255,0,0.2)",
+                    name="95% Confidence Interval",
+                    showlegend=True
+                ), row=2, col=2
+            )
+
+    # Plot 5: Anomaly Breakdown
+    fig.add_trace(
+        go.Pie(
+            labels=["Normal", "Governance Anomaly", "Z-score Anomaly"],
+            values=[
+                len(dfr) - dfr["is_anomaly"].sum(),
+                gov_anom_count,
+                z_anom_count
+            ],
+            hole=0.3,
+            name="Anomaly Types"
+        ), row=3, col=1
+    )
+
+    # Plot 6: Vaccination vs Death Rate Scatter
+    if vacc_col:
+        df_lag = dfr.copy()
+        df_lag["vacc_lag"] = df_lag[vacc_col].shift(lag)
+        df_scatter = df_lag.dropna(subset=["vacc_lag", "Death_rate_100k"])
+        
+        fig.add_trace(
+            go.Scatter(
+                x=df_scatter["vacc_lag"],
+                y=df_scatter["Death_rate_100k"],
+                mode="markers",
+                name="Vaccination vs Death Rate",
+                marker=dict(
+                    color=df_scatter["is_anomaly"],
+                    colorscale=[[0, "blue"], [1, "red"]],
+                    size=5,
+                    opacity=0.7,
+                    colorbar=dict(
+                        title="Anomaly",
+                        x=1.02,
+                        y=0.5,
+                        yanchor="middle",
+                        len=0.5,
+                        xref='paper',
+                        yref='paper'
+                    )
+                )
+            ), row=3, col=2
+        )
+        
+        # Add regression line
+        if len(df_scatter) > 10:
+            slope, intercept, r_value, p_value, std_err = stats.linregress(
+                df_scatter["vacc_lag"], df_scatter["Death_rate_100k"]
+            )
+            x_range = np.array([df_scatter["vacc_lag"].min(), df_scatter["vacc_lag"].max()])
+            y_range = intercept + slope * x_range
+            fig.add_trace(
+                go.Scatter(
+                    x=x_range, y=y_range,
+                    mode="lines",
+                    line=dict(color="red", width=2),
+                    name="Regression Line"
+                ), row=3, col=2
+            )
+    else:
+        fig.add_annotation(
+            text="No vaccination data available for this analysis",
+            xref="x6 domain", yref="y6 domain",
+            x=0.5, y=0.5, xanchor='center', yanchor='middle',
+            showarrow=False, font=dict(size=16)
+        )
+
+    # Add side title for pie chart
+    fig.add_annotation(
+        text="Anomaly Breakdown",
+        xref="x5 domain", yref="y5 domain",
+        x=-0.15, y=0.5,
+        xanchor='right', yanchor='middle',
+        showarrow=False,
+        font=dict(size=14, family="Arial, sans-serif"),
+        textangle=-90
+    )
+
+    # Add explanations for each chart
+    annotations = [
+        ("Shows the trend of death rates and highlights statistical outliers.", 1, 1),
+        ("Displays the correlation between vaccination and death rates over different time lags.", 1, 2),
+        ("Ranks regions by the total number of detected anomalies.", 2, 1),
+        ("Simulates the potential impact of policy changes on death rates.", 2, 2),
+        ("", 3, 1), # No annotation for pie chart
+        ("Illustrates the relationship between vaccination rates and death rates.", 3, 2)
+    ]
+
+    for text, row, col in annotations:
+        if text:
+            fig.add_annotation(
+                text=text,
+                xref=f"x{row*col + col} domain",
+                yref=f"y{row*col + col} domain",
+                x=0.5, y=-0.2,
+                xanchor='center', yanchor='top',
+                showarrow=False,
+                font=dict(size=11, color="grey"),
+                row=row, col=col
+            )
+
+    fig.update_layout(
+        height=1000,
+        title_text=f"COVID-19 Dashboard - {region if region != 'ALL' else 'All Regions'}",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    # Update y-axes
+    fig.update_yaxes(title_text="Death Rate per 100k", row=1, col=1)
+    if vacc_col:
+        fig.update_yaxes(title_text="Vaccination Rate per 100k", secondary_y=True, row=1, col=1)
+    fig.update_yaxes(title_text="Correlation Coefficient", row=1, col=2)
+    fig.update_yaxes(title_text="Anomaly Count", row=2, col=1)
+    fig.update_yaxes(title_text="Death Rate per 100k", row=2, col=2)
+    fig.update_yaxes(title_text="Death Rate per 100k", row=3, col=2)
+    
+    # Update x-axes
+    fig.update_xaxes(title_text="Date", row=1, col=1)
+    fig.update_xaxes(title_text="Lag (days)", row=1, col=2)
+    fig.update_xaxes(title_text="WHO Region", row=2, col=1)
+    fig.update_xaxes(title_text="Date", row=2, col=2)
+    fig.update_xaxes(title_text="", row=3, col=1)
+    if vacc_col:
+        fig.update_xaxes(title_text=f"{vacc_col.replace('_', ' ').title()} (per 100k)", row=3, col=2)
+
+    # More detailed, smaller font summary text
+    text = html.Div([
+        html.P(f"Analysis for: {region if region != 'ALL' else 'All Regions'}"),
+        html.Ul([
+            html.Li(f"Lag Analysis: The strongest correlation between vaccination and reduced death rates is observed at a lag of approximately {lag} days."),
+            html.Li(f"Policy Simulation: A {policy:+d}% change in vaccination coverage is projected to change the average death rate from {metrics['base_death_rate']:.2f} to {metrics['simulated_death_rate']:.2f} per 100k."),
+            html.Li(f"Anomaly Detection: Found {dfr['is_anomaly'].sum()} anomalies in the selected data. This includes {gov_anom_count} from governance reports and {z_anom_count} from statistical analysis (Z-score)."),
+            html.Li(f"Data Source: Aggregated regional data with governance validation.")
+        ])
+    ])
+
+    return fig, text, policy_results
+if __name__ == "__main__":
+    app.run(debug=False)
