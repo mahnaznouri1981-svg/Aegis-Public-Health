@@ -174,9 +174,10 @@ If you use this repository, please cite as:
 License
 This project is licensed under the MIT License.
 See the LICENSE file for details.
+
 Author
 Mahnaz Nouri
-📧 Email:
+Email:
 Mahnaznouri1981@gmail.com
 Mahnaznoori@gmail.com
 
