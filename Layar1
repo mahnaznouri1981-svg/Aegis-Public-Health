@@ -1,0 +1,587 @@
+# ============================================================
+#Layar1###################################################################################################################
+# ============================================================
+
+
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov  9 16:34:13 2025
+
+@author: Mahnaz Nouri
+"""
+
+import requests
+import pandas as pd
+import numpy as np
+import time
+import os
+from datetime import datetime
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ==================== HELPER FUNCTIONS ====================
+
+def create_session_with_retries(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 503, 504)):
+    """
+    Create a requests session with retry capability
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+def make_request_with_retry(url, session=None, max_retries=5, delay=2):
+    """
+    Make HTTP request with retry mechanism
+    """
+    if session is None:
+        session = create_session_with_retries()
+    
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url, timeout=30)
+            if response.status_code == 200:
+                return response
+            else:
+                print(f"Attempt {attempt + 1}: HTTP {response.status_code}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay * (attempt + 1))
+        except (requests.exceptions.ConnectionError, 
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException) as e:
+            print(f"Attempt {attempt + 1}: Error - {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(delay * (attempt + 1))
+    
+    print(f"Failed after {max_retries} attempts: {url}")
+    return None
+
+# ==================== WORLD BANK INDICATORS AND COVID DATA FUNCTIONS ====================
+
+def get_indicator_data(indicator, years):
+    """
+    Get data from different World Bank indicators
+    """
+    base_url = "https://api.worldbank.org/v2/country/all/indicator/"
+    data_dict = {}
+    session = create_session_with_retries()
+    
+    for year in years:
+        url = f"{base_url}{indicator}?date={year}&format=json&per_page=300"
+        print(f"Downloading {indicator} for year {year}...")
+        
+        response = make_request_with_retry(url, session)
+        
+        if response is not None:
+            try:
+                data = response.json()
+                if len(data) > 1 and data[1]:
+                    year_data = {}
+                    for item in data[1]:
+                        if item['value'] is not None:
+                            country = item['country']['value']
+                            value = item['value']
+                            year_data[country] = value
+                    data_dict[year] = year_data
+                    print(f"Successfully downloaded {indicator} for {year}")
+                else:
+                    print(f"No data found for {indicator} in {year}")
+            except Exception as e:
+                print(f"Error parsing JSON for {indicator} in {year}: {str(e)}")
+        else:
+            print(f"Failed to download {indicator} for {year}")
+        
+        # Add delay between requests to avoid rate limiting
+        time.sleep(1)
+    
+    return data_dict
+
+def get_country_codes():
+    """
+    Get a list of countries and their codes
+    """
+    url = "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?date=2023&format=json&per_page=300"
+    print("Downloading country codes...")
+    
+    response = make_request_with_retry(url)
+    
+    if response is not None:
+        try:
+            data = response.json()
+            if len(data) > 1 and data[1]:
+                country_codes = {}
+                for item in data[1]:
+                    country_name = item['country']['value']
+                    country_id = item['country']['id']
+                    country_codes[country_name] = country_id
+                print(f"Successfully downloaded {len(country_codes)} country codes")
+                return country_codes
+        except Exception as e:
+            print(f"Error parsing country codes: {str(e)}")
+    
+    print("Failed to download country codes")
+    return None
+
+def get_covid_data(location_key):
+    """
+    Get COVID data for a country from Google's COVID-19 Open Data repository
+    """
+    url = f"https://storage.googleapis.com/covid19-open-data/v3/location/{location_key}.csv"
+    try:
+        response = make_request_with_retry(url)
+        if response is not None:
+            from io import StringIO
+            data = StringIO(response.text)
+            df = pd.read_csv(data)      
+                    
+            # Add location_key column to identify country
+            df['location_key'] = location_key
+            return df
+    except Exception as e:
+        print(f"Error processing data for country {location_key}: {str(e)}")
+    return None
+
+def combine_covid_with_indicators(Covid19, df_indicators):
+    """
+    Combine COVID data with World Bank indicators
+    
+    Args:
+        Covid19: DataFrame of COVID data
+        df_indicators: DataFrame of World Bank indicators
+    
+    Returns:
+        Combined DataFrame
+    """
+    print("Combining COVID data with World Bank indicators...")
+    
+    # Extract year from date in COVID data
+    if 'date' in Covid19.columns:
+        Covid19['date'] = pd.to_datetime(Covid19['date'])
+        Covid19['year'] = Covid19['date'].dt.year.astype(str)
+    else:
+        print("'date' column not found in COVID data")
+        return None
+    
+    # Create mapping between country name and country code
+    country_mapping = df_indicators[['location_key']].copy()
+    country_mapping['location'] = country_mapping.index  # Add country name from index
+    country_mapping = country_mapping.dropna(subset=['location_key'])
+    country_mapping = country_mapping.drop_duplicates('location_key')
+    country_dict = dict(zip(country_mapping['location_key'], country_mapping['location']))
+    
+    # Add country names to COVID data
+    Covid19['location'] = Covid19['location_key'].map(country_dict)
+    
+    # List of indicators available in World Bank data
+    indicator_columns = [col for col in df_indicators.columns if col not in ['location_key']]
+    print(f"Number of available indicators: {len(indicator_columns)}")
+    
+    # Extract years in indicators
+    years_in_indicators = set()
+    for col in indicator_columns:
+        parts = col.split('_')
+        if parts[-1].isdigit():
+            years_in_indicators.add(parts[-1])
+    years_in_indicators = sorted(years_in_indicators)
+    print(f"Years available in indicators: {years_in_indicators}")
+    
+    # Create dictionary to store indicator values
+    indicators_data = {}
+    
+    # Populate dictionary with indicator data
+    for col in indicator_columns:
+        # Extract indicator name and year
+        parts = col.split('_')
+        indicator_name = '_'.join(parts[:-1])
+        year = parts[-1]
+        
+        if indicator_name not in indicators_data:
+            indicators_data[indicator_name] = {}
+        
+        # For each country, store the indicator value
+        for _, row in df_indicators.iterrows():
+            country_key = row['location_key']
+            value = row[col]
+            
+            if pd.notna(value):
+                if country_key not in indicators_data[indicator_name]:
+                    indicators_data[indicator_name][country_key] = {}
+                indicators_data[indicator_name][country_key][year] = value
+    
+    # Identify constant indicators (only one value per country)
+    constant_indicators = []
+    for indicator, countries in indicators_data.items():
+        # Check if there's only one value for each country
+        is_constant = True
+        for country_key, years_data in countries.items():
+            if len(set(years_data.values())) > 1:
+                is_constant = False
+                break
+        
+        if is_constant:
+            constant_indicators.append(indicator)
+    
+    print(f"Number of constant indicators: {len(constant_indicators)}")
+    print(f"Sample constant indicators: {constant_indicators[:5]}")
+    
+    # Create indicator columns in COVID data
+    print("Adding indicator columns to COVID data...")
+    
+    # Create a copy of the COVID dataframe to add new columns
+    combined_df = Covid19.copy()
+    
+    # For each indicator, create the corresponding column
+    total_indicators = len(indicator_columns)
+    for i, indicator in enumerate(indicator_columns):
+        # Print progress
+        if i % 10 == 0 or i == total_indicators - 1:
+            print(f"Adding indicators: {i+1}/{total_indicators} ({(i+1)/total_indicators*100:.1f}%)")
+        
+        # Extract indicator name and year
+        parts = indicator.split('_')
+        indicator_name = '_'.join(parts[:-1])
+        year = parts[-1]
+        
+        # Create a new column
+        new_col_name = indicator
+        
+        # If indicator is constant, use a fixed value
+        if indicator_name in constant_indicators:
+            # Create a dictionary for constant values
+            constant_values = {}
+            for country_key in indicators_data[indicator_name]:
+                # Fixed value for this country
+                constant_value = list(indicators_data[indicator_name][country_key].values())[0]
+                constant_values[country_key] = constant_value
+            
+            # Add a column with fixed values
+            combined_df[new_col_name] = combined_df['location_key'].map(constant_values)
+        else:
+            # Create a dictionary for annual values
+            year_values = {}
+            for country_key in indicators_data[indicator_name]:
+                if year in indicators_data[indicator_name][country_key]:
+                    year_values[country_key] = indicators_data[indicator_name][country_key][year]
+            
+            # Add a column with annual values
+            def get_year_value(row):
+                country_key = row['location_key']
+                record_year = row['year']
+                
+                # If indicator exists for this country and year
+                if country_key in year_values and record_year in indicators_data[indicator_name][country_key]:
+                    return indicators_data[indicator_name][country_key][record_year]
+                
+                # If indicator exists for this country but not for this year, use the closest year
+                elif country_key in indicators_data[indicator_name]:
+                    available_years = sorted(indicators_data[indicator_name][country_key].keys(), key=int)
+                    if available_years:
+                        # Find the nearest year
+                        closest_year = min(available_years, key=lambda x: abs(int(x) - int(record_year)))
+                        return indicators_data[indicator_name][country_key][closest_year]
+                return np.nan
+            
+            combined_df[new_col_name] = combined_df.apply(get_year_value, axis=1)
+    
+    # Remove temporary columns
+    if 'location' in combined_df.columns:
+        combined_df.drop(['location'], axis=1, inplace=True)
+    
+    return combined_df
+
+def create_covid_with_worldbank_indicators():
+    """
+    Main function to execute the combination of COVID data and World Bank indicators
+    """
+    print("=== Starting COVID and World Bank indicators data collection ===")
+    
+    # Get list of countries and their codes
+    print("\nGetting list of countries and their codes...")
+    country_codes_dict = get_country_codes()
+    
+    if country_codes_dict is None:
+        print("Error getting country codes")
+        return None
+    
+    print(f"Number of countries received: {len(country_codes_dict)}")
+    
+    # Desired years
+    years = ["2019", "2020", "2021", "2022", "2023", "2024", "2025"]
+    diabetes_years = ["2018", "2019", "2020", "2021", "2022", "2023", "2024"]
+    
+    # Get data from World Bank indicators
+    print("\nGetting World Bank indicators data...")
+    
+    # Get population data
+    population_data = get_indicator_data("SP.POP.TOTL", years)
+    
+    # Get GDP data
+    gdp_data = get_indicator_data("NY.GDP.PCAP.CD", years)
+    
+    # Get life expectancy data
+    life_expectancy_data = get_indicator_data("SP.DYN.LE00.IN", years)
+    
+    # Get diabetes prevalence data
+    diabetes_data = get_indicator_data("SH.STA.DIAB.ZS", diabetes_years)
+    
+    # Get female smoking data
+    smoking_female_data = get_indicator_data("SH.PRV.SMOK.FE", years)
+    
+    # Get male smoking data
+    smoking_male_data = get_indicator_data("SH.PRV.SMOK.MA", years)
+    
+    # Get overweight prevalence data
+    overweight_data = get_indicator_data("SH.STA.OWGH.ZS", years)
+    
+    # Get obesity prevalence data
+    obesity_data = get_indicator_data("SH.STA.OBES.ZS", years)
+    
+    # Get HIV prevalence data
+    hiv_data = get_indicator_data("SH.HIV.1524.ZS", years)
+    
+    # Get child malnutrition data
+    malnutrition_data = get_indicator_data("SH.STA.MALN.ZS", years)
+    
+    # Get child anemia data
+    anemia_data = get_indicator_data("SH.STA.STNT.ZS", years)
+    
+    # Get access to clean water data
+    water_access_data = get_indicator_data("SH.H2O.BASW.ZS", years)
+    
+    # Get access to sanitation data
+    sanitation_access_data = get_indicator_data("SH.STA.BASS.ZS", years)
+    
+    # Get hospital beds data
+    hospital_beds_data = get_indicator_data("SH.MED.BEDS.ZS", years)
+    
+    # Get physicians data
+    physicians_data = get_indicator_data("SH.MED.PHYS.ZS", years)
+    
+    # Create a set of all countries
+    all_countries = set()
+    for year_data in population_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in gdp_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in life_expectancy_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in diabetes_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in smoking_female_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in smoking_male_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in overweight_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in obesity_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in hiv_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in malnutrition_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in anemia_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in water_access_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in sanitation_access_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in hospital_beds_data.values():
+        all_countries.update(year_data.keys())
+    for year_data in physicians_data.values():
+        all_countries.update(year_data.keys())
+    
+    # Build final DataFrame for World Bank indicators
+    print("\nBuilding World Bank indicators DataFrame...")
+    df_final = pd.DataFrame(index=list(all_countries))
+    
+    # Add location_key column
+    df_final['location_key'] = df_final.index.map(lambda x: country_codes_dict.get(x, None))
+    
+    # Add population data
+    for year in years:
+        year_data = population_data.get(year, {})
+        df_final[f'population_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add GDP data
+    for year in years:
+        year_data = gdp_data.get(year, {})
+        df_final[f'GDP_per_capita(current_US$)_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add life expectancy data
+    for year in years:
+        year_data = life_expectancy_data.get(year, {})
+        df_final[f'Life_expectancy_at_birth_total_years_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add diabetes prevalence data
+    for year in diabetes_years:
+        year_data = diabetes_data.get(year, {})
+        df_final[f'Diabetes_prevalence_%_ages_20_to_79_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add female smoking data
+    for year in years:
+        year_data = smoking_female_data.get(year, {})
+        df_final[f'Smoking_prevalence_female_%_adults_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add male smoking data
+    for year in years:
+        year_data = smoking_male_data.get(year, {})
+        df_final[f'Smoking_prevalence_male_%_adults_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add overweight prevalence data
+    for year in years:
+        year_data = overweight_data.get(year, {})
+        df_final[f'Overweight_prevalence_%_adults_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add obesity prevalence data
+    for year in years:
+        year_data = obesity_data.get(year, {})
+        df_final[f'Obesity_prevalence_%_adults_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add HIV prevalence data
+    for year in years:
+        year_data = hiv_data.get(year, {})
+        df_final[f'HIV_prevalence_%_ages_15_to_49_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add child malnutrition data
+    for year in years:
+        year_data = malnutrition_data.get(year, {})
+        df_final[f'Malnutrition_prevalence_%_children_under_5_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add child anemia data
+    for year in years:
+        year_data = anemia_data.get(year, {})
+        df_final[f'Anemia_prevalence_%_children_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add access to clean water data
+    for year in years:
+        year_data = water_access_data.get(year, {})
+        df_final[f'Access_to_clean_water_%_population_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add access to sanitation data
+    for year in years:
+        year_data = sanitation_access_data.get(year, {})
+        df_final[f'Access_to_sanitation_%_population_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add hospital beds data
+    for year in years:
+        year_data = hospital_beds_data.get(year, {})
+        df_final[f'Hospital_beds_per_10000_people_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Add physicians data
+    for year in years:
+        year_data = physicians_data.get(year, {})
+        df_final[f'Physicians_per_10000_people_{year}'] = df_final.index.map(lambda x: year_data.get(x, None))
+    
+    # Rename index column to location
+    df_final.index.name = 'location'
+    
+    # Sort by 2019 population
+    df_final = df_final.sort_values(by='population_2019', ascending=False)
+    
+    print(f"World Bank indicators DataFrame created successfully. Number of countries: {len(df_final)}")
+    
+    # Get COVID data for all countries
+    print("\nGetting COVID data for all countries...")
+    location_keys = list(country_codes_dict.values())
+    
+    all_data = []
+    failed_countries = []
+    
+    total_countries = len(location_keys)
+    for i, location_key in enumerate(location_keys):
+        # Print progress
+        if i % 10 == 0 or i == total_countries - 1:
+            print(f"Downloading data: {i+1}/{total_countries} ({(i+1)/total_countries*100:.1f}%)")
+        
+        df = get_covid_data(location_key)
+        if df is not None and not df.empty:
+            all_data.append(df)
+        else:
+            failed_countries.append(location_key)
+        
+        # Increase delay between requests to avoid rate limiting
+        time.sleep(0.5)
+    
+    # Combine all data into one DataFrame
+    if all_data:
+        Covid19 = pd.concat(all_data, ignore_index=True)
+        print(f"\nCOVID DataFrame created successfully. Total records: {len(Covid19)}")
+    else:
+        print("No data received!")
+        return None
+    
+    # Show number of successful and failed countries
+    print(f"\nNumber of countries with successful data download: {len(all_data)}")
+    print(f"Number of countries with failed data download: {len(failed_countries)}")
+    
+    if failed_countries:
+        print("\nCountries with failed data download:")
+        print(failed_countries[:10])  # Show first 10 countries
+    
+    # Combine COVID data and World Bank indicators
+    print("\nCombining COVID data and World Bank indicators...")
+    combined_df = combine_covid_with_indicators(Covid19, df_final)
+    
+    if combined_df is not None:
+        print("\n=== Final Information ===")
+        print(f"Total records: {len(combined_df)}")
+        print(f"Total columns: {len(combined_df.columns)}")
+        
+        if 'date' in combined_df.columns:
+            print(f"Date range: {combined_df['date'].min()} to {combined_df['date'].max()}")
+        
+        # Save combined data
+        output_file = 'covid19_with_worldbank_indicators.csv'
+        try:
+            combined_df.to_csv(output_file, index=False)
+            print(f"\nCombined data successfully saved to file {output_file}")
+            return combined_df
+        except Exception as e:
+            print(f"Error saving file: {str(e)}")
+            
+            # Try to save in alternative paths
+            try:
+                documents_path = os.path.join(os.path.expanduser('~'), 'Documents')
+                output_path = os.path.join(documents_path, output_file)
+                combined_df.to_csv(output_path, index=False)
+                print(f"Combined data saved to file {output_path}")
+                return combined_df
+            except Exception as e2:
+                print(f"Error saving alternative file: {str(e2)}")
+                return None
+    
+    else:
+        print("Data combination failed")
+        return None
+
+# ==================== MAIN FUNCTION ====================
+
+def main():
+    """
+    Main function to execute the entire process
+    """
+    print("=== COVID-19 and World Bank Indicators Data Collection ===")
+    
+    # Step 1: Create base COVID and World Bank indicators dataset
+    print("\nStep 1: Creating base COVID and World Bank indicators dataset...")
+    base_df = create_covid_with_worldbank_indicators()
+    
+    if base_df is not None:
+        print("\nProcess completed successfully.")
+        print(f"Final dataset shape: {base_df.shape}")
+        print(f"Dataset saved to: covid19_with_worldbank_indicators.csv")
+    else:
+        print("\nProcess failed to create the dataset.")
+
+# Execute the main function
+if __name__ == "__main__":
+    main()
+
