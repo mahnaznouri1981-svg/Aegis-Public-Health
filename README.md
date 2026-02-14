@@ -178,6 +178,6 @@ See the LICENSE file for details.
 Author
 Mahnaz Nouri
 Email:
-Mahnaznouri1981@gmail.com
+Mahnaznouri1981@gmail.com   , 
 Mahnaznoori@gmail.com
 
